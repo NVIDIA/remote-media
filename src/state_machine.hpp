@@ -314,6 +314,34 @@ struct MountPointStateMachine
                                      state.machine.config.endPointId);
             iface->register_property("Socket", state.machine.config.unixSocket);
 
+            iface->register_property(
+                "ImageURL", std::string(""),
+                [](const std::string &req, std::string &property) {
+                  property = req;
+                  return -1;
+                },
+                [&machine = state.machine](const std::string &property) {
+                  if (std::get_if<ActiveState>(&machine.state)) {
+                    return std::string(machine.target->imgUrl);
+                  } else {
+                    return std::string("");
+                  }
+                });
+            iface->register_property(
+                "User", std::string(""),
+                [](const std::string &req, std::string &property) {
+                  property = req;
+                  return -1;
+                },
+                [&machine = state.machine](const std::string &property) {
+                  if (std::get_if<ActiveState>(&machine.state)) {
+                    return USER;
+
+                  } else {
+                    return std::string("");
+                  }
+                });
+
             iface->initialize();
         }
 
