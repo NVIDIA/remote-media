@@ -8,6 +8,7 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/process.hpp>
 #include <filesystem>
+#include <fstream>
 #include <sdbusplus/asio/object_server.hpp>
 
 namespace fs = std::filesystem;
