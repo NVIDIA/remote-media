@@ -341,6 +341,16 @@ struct MountPointStateMachine
                     return std::string("");
                   }
                 });
+            iface->register_property(
+                "WriteProtected", bool(true),
+                [](const bool &req, bool &property) { return 0; },
+                [&machine = state.machine](const bool &property) {
+                  if (!machine.target->rw) {
+                    return true;
+                  } else {
+                    return false;
+                  }
+                });
 
             iface->initialize();
         }
