@@ -2,14 +2,15 @@
 
 #include "logger.hpp"
 
-#include <algorithm>
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/container/flat_map.hpp>
 #include <boost/process.hpp>
+#include <sdbusplus/asio/object_server.hpp>
+
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <sdbusplus/asio/object_server.hpp>
 
 namespace fs = std::filesystem;
 
@@ -353,8 +354,7 @@ class Process : public std::enable_shared_from_this<Process>
             const std::string& app, const NBDDevice& dev) :
         ioc(ioc),
         pipe(ioc), name(name), app(app), dev(dev)
-    {
-    }
+    {}
 
     template <typename ExitCb>
     bool spawn(const std::vector<std::string>& args, ExitCb&& onExit)
@@ -474,9 +474,9 @@ class Process : public std::enable_shared_from_this<Process>
     const NBDDevice& dev;
 };
 
-struct UsbGadget
+class FsHelper
 {
-  private:
+  protected:
     static bool echoToFile(const fs::path& fname, const std::string& content)
     {
         std::ofstream fileWriter;
@@ -487,7 +487,10 @@ struct UsbGadget
         LogMsg(Logger::Debug, "echo ", content, " > ", fname);
         return true;
     }
+};
 
+struct UsbGadget : private FsHelper
+{
   public:
     static int32_t configure(const std::string& name, const NBDDevice& nbd,
                              StateChange change, const bool rw = false)
@@ -569,37 +572,36 @@ struct UsbGadget
         // StateChange: unknown, notMonitored, inserted were handler
         // earlier. We'll get here only for removed, or cleanup
 
-
-const std::string gadgetPath = 
-	"/sys/kernel/config/usb_gadget/mass-storage-" + name;
-const std::string removeMassStorageDir = 
-	"rm "+gadgetPath + "/configs/c.1/mass_storage.usb0";
-const std::string removeFuncMassStorageDir = 
-	"rmdir "+gadgetPath + "/functions/mass_storage.usb0";
-const std::string removeConfigStringsDir = 
-	"rmdir  "+gadgetPath + "/configs/c.1/strings/0x409";
-const std::string removeConfigDir = 
-	"rmdir  "+gadgetPath + "/configs/c.1";
-const std::string removeStringsDir = 
-	"rmdir  "+gadgetPath + "/strings/0x409";
-const std::string removeGadgetDir = 
-	"rmdir  "+gadgetPath ;
+        const std::string gadgetPath =
+            "/sys/kernel/config/usb_gadget/mass-storage-" + name;
+        const std::string removeMassStorageDir =
+            "rm " + gadgetPath + "/configs/c.1/mass_storage.usb0";
+        const std::string removeFuncMassStorageDir =
+            "rmdir " + gadgetPath + "/functions/mass_storage.usb0";
+        const std::string removeConfigStringsDir =
+            "rmdir  " + gadgetPath + "/configs/c.1/strings/0x409";
+        const std::string removeConfigDir =
+            "rmdir  " + gadgetPath + "/configs/c.1";
+        const std::string removeStringsDir =
+            "rmdir  " + gadgetPath + "/strings/0x409";
+        const std::string removeGadgetDir = "rmdir  " + gadgetPath;
 
         const std::array<const char*, 6> dirs = {
-            removeMassStorageDir.c_str(), removeFuncMassStorageDir.c_str(),
-	    removeConfigStringsDir.c_str(), removeConfigDir.c_str(), 
-	    removeStringsDir.c_str(), removeGadgetDir.c_str()};
+            removeMassStorageDir.c_str(),   removeFuncMassStorageDir.c_str(),
+            removeConfigStringsDir.c_str(), removeConfigDir.c_str(),
+            removeStringsDir.c_str(),       removeGadgetDir.c_str()};
 
-	for (const char* dir : dirs)
-	{
-		int ret =0;
-		ret=system(dir);
-		if(ret != 0)
-		{
-			success = false;
-			LogMsg(Logger::Error, "[App]: UsbGadget : Can't remove file or directory");
-		}
-	}
+        for (const char* dir : dirs)
+        {
+            int ret = 0;
+            ret = system(dir);
+            if (ret != 0)
+            {
+                success = false;
+                LogMsg(Logger::Error,
+                       "[App]: UsbGadget : Can't remove file or directory");
+            }
+        }
 
         if (success)
         {
@@ -607,5 +609,24 @@ const std::string removeGadgetDir =
         }
         return -1;
     }
+};
 
+class UdevGadget : private FsHelper
+{
+  public:
+    // Workaround for HSD18020136609: Can not mount image using Virtual media
+    // and CIFS protocol
+    // This force-triggers udev change events for nbd[0-3] devices, which
+    // prevents from disconnection on first mount event after reboot. The actual
+    // rootcause is related with kernel changes that occured between 5.10.67 and
+    // 5.14.11. This lead will continue to be investigated in order to provide
+    // proper fix.
+    static void forceUdevChange()
+    {
+        std::string changeStr = "change";
+        echoToFile("/sys/block/nbd0/uevent", changeStr);
+        echoToFile("/sys/block/nbd1/uevent", changeStr);
+        echoToFile("/sys/block/nbd2/uevent", changeStr);
+        echoToFile("/sys/block/nbd3/uevent", changeStr);
+    }
 };

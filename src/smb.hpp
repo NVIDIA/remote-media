@@ -14,8 +14,7 @@ class SmbShare
 {
   public:
     SmbShare(const fs::path& mountDir) : mountDir(mountDir)
-    {
-    }
+    {}
 
     bool mount(const fs::path& remote, bool rw,
                const std::unique_ptr<utils::CredentialsProvider>& credentials)
@@ -62,6 +61,11 @@ class SmbShare
     {
         auto destPath = fs::temp_directory_path() / name;
         std::error_code ec;
+
+        if (fs::exists(destPath))
+        {
+            unmount(destPath);
+        }
 
         if (fs::create_directory(destPath, ec))
         {

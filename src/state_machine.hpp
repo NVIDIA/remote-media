@@ -8,11 +8,12 @@
 
 #include <sys/mount.h>
 
+#include <sdbusplus/asio/object_server.hpp>
+
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
-#include <sdbusplus/asio/object_server.hpp>
 #include <stdexcept>
 #include <system_error>
 #include <variant>
@@ -22,8 +23,7 @@ struct MountPointStateMachine
     struct InvalidStateError : std::runtime_error
     {
         InvalidStateError(const char* what) : std::runtime_error(what)
-        {
-        }
+        {}
     };
 
     struct Error
@@ -48,8 +48,7 @@ struct MountPointStateMachine
 
         BasicState(const BasicState& state) :
             machine{state.machine}, stateName{state.stateName}
-        {
-        }
+        {}
 
         BasicState(const BasicState& state, const char* stateName) :
             machine{state.machine}, stateName{stateName}
@@ -113,8 +112,7 @@ struct MountPointStateMachine
     {
         ActivatingState(const BasicState& state) :
             BasicState(state, __FUNCTION__)
-        {
-        }
+        {}
 
         virtual void onEnter()
         {
@@ -129,8 +127,7 @@ struct MountPointStateMachine
     {
         WaitingForGadgetState(const BasicState& state) :
             BasicState(state, __FUNCTION__)
-        {
-        }
+        {}
 
         std::weak_ptr<Process> process;
     };
@@ -138,8 +135,7 @@ struct MountPointStateMachine
     struct ActiveState : public BasicState
     {
         ActiveState(const BasicState& state) : BasicState(state, __FUNCTION__)
-        {
-        }
+        {}
         ActiveState(const WaitingForGadgetState& state) :
             BasicState(state, __FUNCTION__), process{state.process} {};
 
@@ -150,16 +146,13 @@ struct MountPointStateMachine
     {
         WaitingForProcessEndState(const BasicState& state) :
             BasicState(state, __FUNCTION__)
-        {
-        }
+        {}
         WaitingForProcessEndState(const ActiveState& state) :
             BasicState(state, __FUNCTION__), process{state.process}
-        {
-        }
+        {}
         WaitingForProcessEndState(const WaitingForGadgetState& state) :
             BasicState(state, __FUNCTION__), process{state.process}
-        {
-        }
+        {}
 
         std::weak_ptr<Process> process;
     };
@@ -171,8 +164,7 @@ struct MountPointStateMachine
     struct BasicEvent
     {
         BasicEvent(const char* eventName) : eventName(eventName)
-        {
-        }
+        {}
 
         inline void transitionError(const char* en, const BasicState& state)
         {
@@ -221,8 +213,7 @@ struct MountPointStateMachine
             BasicEvent(__FUNCTION__),
             bus(bus), objServer(objServer),
             emitMountEvent(std::move(emitMountEvent))
-        {
-        }
+        {}
 
         State operator()(const InitialState& state)
         {
@@ -231,6 +222,8 @@ struct MountPointStateMachine
             addMountPointInterface(state);
             addProcessInterface(state);
             addServiceInterface(state, isLegacy);
+            // Workaround for HSD18020136609. Details in system.hpp.
+            UdevGadget::forceUdevChange();
             return ReadyState(state);
         }
 
@@ -275,7 +268,7 @@ struct MountPointStateMachine
             processIface->register_property(
                 "Active", bool(false),
                 [](const bool& req, bool& property) { return 0; },
-                [& machine = state.machine](const bool& property) {
+                [&machine = state.machine](const bool& property) {
                     if (std::get_if<ActiveState>(&machine.state))
                     {
                         return true;
@@ -288,16 +281,16 @@ struct MountPointStateMachine
             processIface->register_property(
                 "ExitCode", int32_t(0),
                 [](const int32_t& req, int32_t& property) { return 0; },
-                [& machine = state.machine](const int32_t& property) {
+                [&machine = state.machine](const int32_t& property) {
                     return machine.exitCode;
                 });
             processIface->register_property(
                 "CDInstance", int32_t(2),
-                [](const int32_t &req, int32_t &property) {
-                  property = req;
-                  return req;
+                [](const int32_t& req, int32_t& property) {
+                    property = req;
+                    return req;
                 },
-                [](int32_t &property) -> int32_t { return property; });
+                [](int32_t& property) -> int32_t { return property; });
             processIface->initialize();
         }
 
@@ -316,40 +309,48 @@ struct MountPointStateMachine
 
             iface->register_property(
                 "ImageURL", std::string(""),
-                [](const std::string &req, std::string &property) {
-                  property = req;
-                  return -1;
+                [](const std::string& req, std::string& property) {
+                    property = req;
+                    return -1;
                 },
-                [&machine = state.machine](const std::string &property) {
-                  if (std::get_if<ActiveState>(&machine.state)) {
-                    return std::string(machine.target->imgUrl);
-                  } else {
-                    return std::string("");
-                  }
+                [&machine = state.machine](const std::string& property) {
+                    if (std::get_if<ActiveState>(&machine.state))
+                    {
+                        return std::string(machine.target->imgUrl);
+                    }
+                    else
+                    {
+                        return std::string("");
+                    }
                 });
             iface->register_property(
                 "User", std::string(""),
-                [](const std::string &req, std::string &property) {
-                  property = req;
-                  return -1;
+                [](const std::string& req, std::string& property) {
+                    property = req;
+                    return -1;
                 },
-                [&machine = state.machine](const std::string &property) {
-                  if (std::get_if<ActiveState>(&machine.state)) {
-                    return USER;
-
-                  } else {
-                    return std::string("");
-                  }
+                [&machine = state.machine](const std::string& property) {
+                    if (std::get_if<ActiveState>(&machine.state))
+                    {
+                        return USER;
+                    }
+                    else
+                    {
+                        return std::string("");
+                    }
                 });
             iface->register_property(
                 "WriteProtected", bool(true),
-                [](const bool &req, bool &property) { return 0; },
-                [&machine = state.machine](const bool &property) {
-                  if (!machine.target->rw) {
-                    return true;
-                  } else {
-                    return false;
-                  }
+                [](const bool& req, bool& property) { return 0; },
+                [&machine = state.machine](const bool& property) {
+                    if (!machine.target->rw)
+                    {
+                        return true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
                 });
 
             iface->initialize();
@@ -367,7 +368,7 @@ struct MountPointStateMachine
             // Common unmount
             iface->register_method(
                 "Unmount",
-                [& machine = state.machine](boost::asio::yield_context yield) {
+                [&machine = state.machine](boost::asio::yield_context yield) {
                     LogMsg(Logger::Info, "[App]: Unmount called on ",
                            machine.name);
                     try
@@ -442,7 +443,7 @@ struct MountPointStateMachine
                 using optional_fd = std::variant<int, unix_fd>;
 
                 iface->register_method(
-                    "Mount", [& machine = state.machine, this, handleMount](
+                    "Mount", [&machine = state.machine, this, handleMount](
                                  boost::asio::yield_context yield,
                                  std::string imgUrl, bool rw, optional_fd fd) {
                         LogMsg(Logger::Info, "[App]: Mount called on ",
@@ -505,7 +506,7 @@ struct MountPointStateMachine
             else
             {
                 iface->register_method(
-                    "Mount", [& machine = state.machine, this,
+                    "Mount", [&machine = state.machine, this,
                               handleMount](boost::asio::yield_context yield) {
                         LogMsg(Logger::Info, "[App]: Mount called on ",
                                getObjectPath(machine), machine.name);
@@ -525,8 +526,7 @@ struct MountPointStateMachine
     struct MountEvent : public BasicEvent
     {
         MountEvent() : BasicEvent(__FUNCTION__)
-        {
-        }
+        {}
         State operator()(const ReadyState& state)
         {
             return ActivatingState(state);
@@ -542,8 +542,7 @@ struct MountPointStateMachine
     struct UnmountEvent : public BasicEvent
     {
         UnmountEvent() : BasicEvent(__FUNCTION__)
-        {
-        }
+        {}
         State operator()(const ActivatingState& state)
         {
             return ReadyState(state);
@@ -576,8 +575,7 @@ struct MountPointStateMachine
     struct SubprocessStoppedEvent : public BasicEvent
     {
         SubprocessStoppedEvent() : BasicEvent(__FUNCTION__)
-        {
-        }
+        {}
         State operator()(const ActivatingState& state)
         {
             return ReadyState(state);
@@ -606,8 +604,7 @@ struct MountPointStateMachine
     struct ActivationStartedEvent : public BasicEvent
     {
         ActivationStartedEvent() : BasicEvent(__FUNCTION__)
-        {
-        }
+        {}
         State operator()(const ActivatingState& state)
         {
             if (state.machine.config.mode == Configuration::Mode::proxy)
@@ -629,7 +626,7 @@ struct MountPointStateMachine
             }
             if (!process->spawn(
                     Configuration::MountPoint::toArgs(state.machine.config),
-                    [& machine = state.machine](int exitCode, bool isReady) {
+                    [&machine = state.machine](int exitCode, bool isReady) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
                         machine.emitSubprocessStoppedEvent();
@@ -779,7 +776,7 @@ struct MountPointStateMachine
             args.insert(args.end(), params.begin(), params.end());
 
             if (!process->spawn(
-                    args, [& machine = machine, secret = std::move(secret)](
+                    args, [&machine = machine, secret = std::move(secret)](
                               int exitCode, bool isReady) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
@@ -810,8 +807,7 @@ struct MountPointStateMachine
             std::unique_ptr<utils::VolatileFile> secret;
             std::vector<std::string> params = {
                 // Use curl plugin ...
-                "curl",
-		"sslverify=false",
+                "curl", "sslverify=false",
                 // ... to mount http resource at url
                 "url=" + url};
 
@@ -913,8 +909,7 @@ struct MountPointStateMachine
     {
         UdevStateChangeEvent(const StateChange& devState) :
             BasicEvent(__FUNCTION__), devState{devState}
-        {
-        }
+        {}
         State operator()(const WaitingForGadgetState& state)
         {
             if (devState == StateChange::inserted)
