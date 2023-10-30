@@ -44,8 +44,8 @@ class App
         for (const auto& [name, entry] : config.mountPoints)
         {
             mpsm[name] = std::make_shared<MountPointStateMachine>(
-                ioc, devMonitor, name, entry);
-            mpsm[name]->emitRegisterDBusEvent(bus, objServer);
+                ioc, devMonitor, name, entry, bus);
+            mpsm[name]->emitRegisterDBusEvent(objServer);
         }
 
         devMonitor.run([this](const NBDDevice& device, StateChange change) {
