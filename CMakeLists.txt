@@ -19,6 +19,10 @@ option(VM_USE_VALGRIND "Build VirtualMedia to work with valgrind" OFF)
 
 option(VM_VERBOSE_NBDKIT_LOGS "Include detailed logs from nbdkit" OFF)
 
+find_package (PkgConfig REQUIRED)
+
+pkg_check_modules (SYSTEMD libsystemd REQUIRED)
+
 if(NOT ${YOCTO_DEPENDENCIES})
   include(ExternalProject)
 
@@ -144,5 +148,8 @@ if(CMAKE_INSTALL_SYSCONFDIR)
   install(FILES ${PROJECT_SOURCE_DIR}/virtual-media.json DESTINATION
                 ${CMAKE_INSTALL_SYSCONFDIR})
 endif()
+if (NOT DEFINED SYSTEMD_SYSTEM_UNIT_DIR)
+    pkg_get_variable(SYSTEMD_SYSTEM_UNIT_DIR systemd systemdsystemunitdir)
+endif()
 install(FILES ${PROJECT_SOURCE_DIR}/xyz.openbmc_project.VirtualMedia.service
-              DESTINATION /lib/systemd/system/)
+              DESTINATION "${SYSTEMD_SYSTEM_UNIT_DIR}")
