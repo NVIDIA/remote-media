@@ -8,6 +8,7 @@
 
 #include <sys/mount.h>
 
+#include <phosphor-logging/redfish_event_log.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <filesystem>
@@ -18,6 +19,7 @@
 #include <system_error>
 #include <variant>
 
+using namespace phosphor::logging;
 struct MountPointStateMachine
 {
     struct InvalidStateError : std::runtime_error
@@ -240,16 +242,7 @@ struct MountPointStateMachine
         std::string getObjectPath(const MountPointStateMachine& machine)
         {
             LogMsg(Logger::Debug, "getObjectPath entry()");
-            std::string objPath;
-            if (machine.config.mode == Configuration::Mode::proxy)
-            {
-                objPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
-            }
-            else
-            {
-                objPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
-            }
-            return objPath;
+            return machine.getObjectPath();
         }
 
         std::string getObjectPath(const InitialState& state)
@@ -560,6 +553,10 @@ struct MountPointStateMachine
                                   "Unable to unmount gadget");
             }
             state.machine.stopProcess(state.process);
+            // send an event
+            auto dbusObjectPath = state.machine.getObjectPath() + state.machine.name;
+            sendEvent(state.machine.bus, MESSAGE_TYPE::RESOURCE_DELETED,
+                  Entry::Level::Informational, std::vector<std::string>{}, dbusObjectPath);
             return WaitingForProcessEndState(state);
         }
         State operator()(const WaitingForProcessEndState& state)
@@ -920,6 +917,10 @@ struct MountPointStateMachine
                     state.machine.target ? state.machine.target->rw : false);
                 if (ret == 0)
                 {
+                    // send an event
+                    auto dbusObjectPath = state.machine.getObjectPath() + state.machine.name;
+                    sendEvent(state.machine.bus, MESSAGE_TYPE::RESOURCE_CREATED,
+                            Entry::Level::Informational, std::vector<std::string>{}, dbusObjectPath);
                     return ActiveState(state);
                 }
                 return ReadyState(state, std::errc::device_or_resource_busy,
@@ -980,9 +981,10 @@ struct MountPointStateMachine
 
     MountPointStateMachine(boost::asio::io_context& ioc,
                            DeviceMonitor& devMonitor, const std::string& name,
-                           const Configuration::MountPoint& config) :
+                           const Configuration::MountPoint& config,
+                           std::shared_ptr<sdbusplus::asio::connection>& bus) :
         ioc{ioc},
-        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}
+        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}, bus(bus)
     {
         devMonitor.addDevice(config.nbdDevice);
     }
@@ -1013,7 +1015,6 @@ struct MountPointStateMachine
     }
 
     void emitRegisterDBusEvent(
-        std::shared_ptr<sdbusplus::asio::connection> bus,
         std::shared_ptr<sdbusplus::asio::object_server> objServer)
     {
         emitEvent(RegisterDbusEvent(bus, objServer));
@@ -1066,4 +1067,18 @@ struct MountPointStateMachine
     std::optional<Target> target;
     State state;
     int exitCode;
+    const std::string proxyObjectPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
+    const std::string legacyObjectPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
+    std::shared_ptr<sdbusplus::asio::connection>& bus;
+    std::string getObjectPath() const
+    {
+        if (config.mode == Configuration::Mode::proxy)
+        {
+            return proxyObjectPath;
+        }
+        else
+        {
+            return legacyObjectPath;
+        }
+    }
 };
