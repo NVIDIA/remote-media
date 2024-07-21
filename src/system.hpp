@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <format>
 
 namespace fs = std::filesystem;
 
@@ -520,6 +522,7 @@ struct UsbGadget : private FsHelper
         const fs::path configDir = gadgetDir / "configs/c.1";
         const fs::path massStorageDir = configDir / "mass_storage.usb0";
         const fs::path configStringsDir = configDir / "strings/0x409";
+        const std::regex gadgetDirRegex("gadget.[0-9]");
 
         if (change == StateChange::inserted)
         {
@@ -530,7 +533,7 @@ struct UsbGadget : private FsHelper
                 echoToFile(gadgetDir / "idProduct", "0x0104");
                 fs::create_directories(stringsDir);
                 echoToFile(stringsDir / "manufacturer", "OpenBMC");
-                echoToFile(stringsDir / "product", "Virtual Media Device");
+                echoToFile(stringsDir / "product", std::format("Virtual Media Device ({})", name));
                 fs::create_directories(configStringsDir);
                 echoToFile(configStringsDir / "configuration", "config 1");
                 fs::create_directories(funcMassStorageDir);
@@ -545,14 +548,21 @@ struct UsbGadget : private FsHelper
                 for (const auto& port : fs::directory_iterator(
                          "/sys/bus/platform/devices/1e6a0000.usb-vhub"))
                 {
-                    if (fs::is_directory(port) && !fs::is_symlink(port) &&
-                        !fs::exists(port.path() / "gadget/suspended"))
+                    if (fs::is_directory(port) && !fs::is_symlink(port))
                     {
-                        const std::string portId = port.path().filename();
-                        LogMsg(Logger::Debug,
-                               "Use port : ", port.path().filename());
-                        echoToFile(gadgetDir / "UDC", portId);
-                        return 0;
+                        for (const auto &dir : fs::directory_iterator(port))
+                        {
+                            if (fs::is_directory(dir) &&
+                                 // In the port directory, check for the gadget directory. Ex: gadget.2
+                                 std::regex_search(dir.path().filename().string(), gadgetDirRegex) &&
+                                 !fs::exists(dir.path() / "suspended"))
+                            {
+                                const std::string portId = port.path().filename();
+                                LogMsg(Logger::Debug, "Use port : ", portId);
+                                echoToFile(gadgetDir / "UDC", portId);
+                                return 0;
+                            }
+                        }
                     }
                 }
             }
