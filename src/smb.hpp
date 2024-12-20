@@ -21,7 +21,7 @@ class SmbShare
     {
         LogMsg(Logger::Debug, "Trying to mount remote : ", remote);
 
-        const std::string params = "sec=ntlmsspi,seal,vers=3.0";
+        const std::string params = "sec=ntlmsspi,seal,vers=3.0,cache=none";
         const std::string perm = rw ? "rw" : "ro";
         auto options = params + "," + perm;
         LogMsg(Logger::Debug, "Mounting with options: ", options);
