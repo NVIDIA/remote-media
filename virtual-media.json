@@ -1,6 +1,14 @@
 {
     "InactivityTimeout": 1800,
     "MountPoints": {
+        "Slot_0": {
+            "EndpointId": "",
+            "Mode": 0,
+            "NBDDevice": "nbd0",
+            "UnixSocket": "/tmp/nbd0.sock",
+            "Timeout": 30,
+            "BlockSize": 512
+        },
         "USB1": {
             "EndpointId": "",
             "Mode": 1,
