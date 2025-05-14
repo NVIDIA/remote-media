@@ -417,7 +417,7 @@ class Process : public std::enable_shared_from_this<Process>
                 while (child.running() && waitCnt > 0)
                 {
                     boost::system::error_code ignored_ec;
-                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.expires_after(std::chrono::milliseconds(100));
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
@@ -438,8 +438,8 @@ class Process : public std::enable_shared_from_this<Process>
 
     void stop()
     {
-        boost::asio::spawn(ioc, [this, self = shared_from_this()](
-                                    boost::asio::yield_context yield) {
+        auto self = shared_from_this();
+        boost::asio::spawn(ioc, [this, self](boost::asio::yield_context yield) {
             // The Good
             dev.disconnect();
 
@@ -449,7 +449,7 @@ class Process : public std::enable_shared_from_this<Process>
             while (child.running() && waitCnt > 0)
             {
                 boost::system::error_code ignored_ec;
-                timer.expires_from_now(std::chrono::milliseconds(100));
+                timer.expires_after(std::chrono::milliseconds(100));
                 timer.async_wait(yield[ignored_ec]);
                 waitCnt--;
             }
@@ -459,7 +459,7 @@ class Process : public std::enable_shared_from_this<Process>
                                      "want to exit nicely");
                 child.terminate();
             }
-        });
+        }, boost::asio::detached);
     }
 
     std::string application()
@@ -533,7 +533,7 @@ struct UsbGadget : private FsHelper
                 echoToFile(gadgetDir / "idProduct", "0x0104");
                 fs::create_directories(stringsDir);
                 echoToFile(stringsDir / "manufacturer", "OpenBMC");
-                echoToFile(stringsDir / "product", std::format("Virtual Media Device ({})", name));
+                echoToFile(stringsDir / "product", "Virtual Media Device (" + name + ")");
                 fs::create_directories(configStringsDir);
                 echoToFile(configStringsDir / "configuration", "config 1");
                 fs::create_directories(funcMassStorageDir);
