@@ -383,7 +383,7 @@ struct MountPointStateMachine
                             break;
                         }
                         boost::system::error_code ignored_ec;
-                        timer.expires_from_now(std::chrono::milliseconds(100));
+                        timer.expires_after(std::chrono::milliseconds(100));
                         timer.async_wait(yield[ignored_ec]);
                         waitCnt--;
                     }
@@ -422,7 +422,7 @@ struct MountPointStateMachine
                         return true;
                     }
                     boost::system::error_code ignored_ec;
-                    timer.expires_from_now(std::chrono::milliseconds(100));
+                    timer.expires_after(std::chrono::milliseconds(100));
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
