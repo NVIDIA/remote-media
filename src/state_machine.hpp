@@ -561,11 +561,15 @@ struct MountPointStateMachine
         }
         State operator()(const WaitingForProcessEndState& state)
         {
-            throw InvalidStateError("Could not unmount on empty slot");
+	    // If already waiting for process end, unmount is a no-op
+            // This is a valid operation that should succeed
+            return state;
         }
         State operator()(const ReadyState& state)
         {
-            throw InvalidStateError("Could not unmount on empty slot");
+	    // If already in ReadyState, there's nothing to unmount
+            // This is a valid operation that should succeed
+            return state;
         }
     };
 
