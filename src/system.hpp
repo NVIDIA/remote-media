@@ -639,4 +639,13 @@ class UdevGadget : private FsHelper
         echoToFile("/sys/block/nbd2/uevent", changeStr);
         echoToFile("/sys/block/nbd3/uevent", changeStr);
     }
+
+    static void setMaxSectorsKb()
+    {
+        std::string maxSectorsKbStr = "128";
+        echoToFile("/sys/block/nbd0/queue/max_sectors_kb", maxSectorsKbStr);
+        echoToFile("/sys/block/nbd1/queue/max_sectors_kb", maxSectorsKbStr);
+        echoToFile("/sys/block/nbd2/queue/max_sectors_kb", maxSectorsKbStr);
+        echoToFile("/sys/block/nbd3/queue/max_sectors_kb", maxSectorsKbStr);
+    }
 };

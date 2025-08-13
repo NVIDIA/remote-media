@@ -226,6 +226,7 @@ struct MountPointStateMachine
             addServiceInterface(state, isLegacy);
             // Workaround for HSD18020136609. Details in system.hpp.
             UdevGadget::forceUdevChange();
+            UdevGadget::setMaxSectorsKb();
             return ReadyState(state);
         }
 
