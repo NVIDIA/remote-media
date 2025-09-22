@@ -5,7 +5,11 @@
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/container/flat_map.hpp>
-#include <boost/process.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/io.hpp>
+#include <boost/process/v1/async_pipe.hpp>
+#include <boost/process/v1/async.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <algorithm>
@@ -363,9 +367,9 @@ class Process : public std::enable_shared_from_this<Process>
     {
         std::error_code ec;
         LogMsg(Logger::Info, "[Process]: Spawning ", app, " (", args, ")");
-        child = boost::process::child(
-            app, boost::process::args(args),
-            (boost::process::std_out & boost::process::std_err) > pipe, ec,
+        child = boost::process::v1::child(
+            app, boost::process::v1::args(args),
+            (boost::process::v1::std_out & boost::process::v1::std_err) > pipe, ec,
             ioc);
 
         if (ec)
@@ -386,12 +390,12 @@ class Process : public std::enable_shared_from_this<Process>
                 while (1)
                 {
                     auto x = boost::asio::async_read_until(
-                        pipe, std::move(buffer), '\n', yield[bec]);
+                        self->pipe, std::move(buffer), '\n', yield[bec]);
                     auto lineBegin = line.begin();
                     while (lineBegin != line.end())
                     {
                         auto lineEnd = find(lineBegin, line.end(), '\n');
-                        LogMsg(Logger::Debug, "[Process]: (", name, ") ",
+                        LogMsg(Logger::Debug, "[Process]: (", self->name, ") ",
                                std::string(lineBegin, lineEnd));
                         if (lineEnd == line.end())
                         {
@@ -403,7 +407,7 @@ class Process : public std::enable_shared_from_this<Process>
                     buffer.consume(x);
                     if (bec)
                     {
-                        LogMsg(Logger::Debug, "[Process]: (", name,
+                        LogMsg(Logger::Debug, "[Process]: (", self->name,
                                ") Loop Error: ", bec);
                         break;
                     }
@@ -412,26 +416,26 @@ class Process : public std::enable_shared_from_this<Process>
                 // The process shall be dead, or almost here, give it a chance
                 LogMsg(Logger::Debug,
                        "[Process]: Waiting process to finish normally");
-                boost::asio::steady_timer timer(ioc);
+                boost::asio::steady_timer timer(self->ioc);
                 int32_t waitCnt = 20;
-                while (child.running() && waitCnt > 0)
+                while (self->child.running() && waitCnt > 0)
                 {
                     boost::system::error_code ignored_ec;
                     timer.expires_after(std::chrono::milliseconds(100));
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
-                if (child.running())
+                if (self->child.running())
                 {
-                    child.terminate();
+                    self->child.terminate();
                 }
 
-                child.wait();
-                LogMsg(Logger::Info, "[Process]: running: ", child.running(),
-                       " EC: ", child.exit_code(),
-                       " Native: ", child.native_exit_code());
+                self->child.wait();
+                LogMsg(Logger::Info, "[Process]: running: ", self->child.running(),
+                       " EC: ", self->child.exit_code(),
+                       " Native: ", self->child.native_exit_code());
 
-                onExit(child.exit_code(), dev.isReady());
+                onExit(self->child.exit_code(), self->dev.isReady());
             });
         return true;
     }
@@ -441,23 +445,23 @@ class Process : public std::enable_shared_from_this<Process>
         auto self = shared_from_this();
         boost::asio::spawn(ioc, [this, self](boost::asio::yield_context yield) {
             // The Good
-            dev.disconnect();
+            self->dev.disconnect();
 
             // The Ugly (but required)
-            boost::asio::steady_timer timer(ioc);
+            boost::asio::steady_timer timer(self->ioc);
             int32_t waitCnt = 20;
-            while (child.running() && waitCnt > 0)
+            while (self->child.running() && waitCnt > 0)
             {
                 boost::system::error_code ignored_ec;
                 timer.expires_after(std::chrono::milliseconds(100));
                 timer.async_wait(yield[ignored_ec]);
                 waitCnt--;
             }
-            if (child.running())
+            if (self->child.running())
             {
                 LogMsg(Logger::Info, "[Process] Terminate if process doesnt "
                                      "want to exit nicely");
-                child.terminate();
+                self->child.terminate();
             }
         }, boost::asio::detached);
     }
@@ -469,8 +473,8 @@ class Process : public std::enable_shared_from_this<Process>
 
   private:
     boost::asio::io_context& ioc;
-    boost::process::child child;
-    boost::process::async_pipe pipe;
+    boost::process::v1::child child;
+    boost::process::v1::async_pipe pipe;
     std::string name;
     std::string app;
     const NBDDevice& dev;

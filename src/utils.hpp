@@ -1,6 +1,6 @@
 #pragma once
 
-#include <boost/process/async_pipe.hpp>
+#include <boost/process/v1/async_pipe.hpp>
 #include <boost/type_traits/has_dereference.hpp>
 #include <cstring>
 #include <filesystem>
@@ -165,7 +165,7 @@ class NamedPipe
     }
 
     const std::string name;
-    boost::process::async_pipe impl;
+    boost::process::v1::async_pipe impl;
     Buffer buffer;
 };
 
