@@ -323,7 +323,7 @@ class DeviceMonitor
                     }
                 }
             }
-        });
+        }, boost::asio::detached);
     }
 
     void addDevice(const NBDDevice& device)
@@ -436,7 +436,7 @@ class Process : public std::enable_shared_from_this<Process>
                        " Native: ", self->child.native_exit_code());
 
                 onExit(self->child.exit_code(), self->dev.isReady());
-            });
+            }, boost::asio::detached);
         return true;
     }
 
