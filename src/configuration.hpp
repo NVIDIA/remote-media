@@ -59,6 +59,7 @@ class Configuration
 
     bool valid = false;
     boost::container::flat_map<std::string, MountPoint> mountPoints;
+    std::string udcDeviceName = "1e6a0000.usb-vhub";    // Default to Aspeed UDC for backward compatibility
 
     Configuration(const std::string& file)
     {
@@ -92,141 +93,154 @@ class Configuration
         return true;
     }
 
+    void parseMountPoints(const nlohmann::json::object_t::const_iterator& mountpoints)
+    {
+        for (const auto& mountpoint : mountpoints)
+        {
+            MountPoint mp;
+            const auto nbdDeviceIter =
+                mountpoint.value().find("NBDDevice");
+            if (nbdDeviceIter != mountpoint.value().cend())
+            {
+                const std::string* value =
+                    nbdDeviceIter->get_ptr<const std::string*>();
+                if (value)
+                {
+                    mp.nbdDevice = NBDDevice(value->c_str());
+                    if (!mp.nbdDevice)
+                    {
+                        LogMsg(Logger::Error,
+                                "NBDDevice unrecognized.");
+                        continue;
+                    }
+                }
+                else
+                {
+                    LogMsg(Logger::Error,
+                            "NBDDevice required, not set");
+                    continue;
+                }
+            };
+            const auto unixSocketIter =
+                mountpoint.value().find("UnixSocket");
+            if (unixSocketIter != mountpoint.value().cend())
+            {
+                const std::string* value =
+                    unixSocketIter->get_ptr<const std::string*>();
+                if (value)
+                {
+                    mp.unixSocket = *value;
+                }
+                else
+                {
+                    LogMsg(Logger::Error,
+                            "UnixSocket required, not set");
+                    continue;
+                }
+            }
+            const auto endPointIdIter =
+                mountpoint.value().find("EndpointId");
+            if (endPointIdIter != mountpoint.value().cend())
+            {
+                const std::string* value =
+                    endPointIdIter->get_ptr<const std::string*>();
+                if (value)
+                {
+                    mp.endPointId = *value;
+                }
+                else
+                {
+                    LogMsg(Logger::Info,
+                            "EndpointId required, not set");
+                    continue;
+                }
+            }
+            const auto timeoutIter = mountpoint.value().find("Timeout");
+            if (timeoutIter != mountpoint.value().cend())
+            {
+                const uint64_t* value =
+                    timeoutIter->get_ptr<const uint64_t*>();
+                if (value)
+                {
+                    mp.timeout = *value;
+                }
+                else
+                {
+                    LogMsg(Logger::Info,
+                            "Timeout not set, use default");
+                }
+            }
+            const auto blocksizeIter =
+                mountpoint.value().find("BlockSize");
+            if (blocksizeIter != mountpoint.value().cend())
+            {
+                const uint64_t* value =
+                    blocksizeIter->get_ptr<const uint64_t*>();
+                if (value)
+                {
+                    mp.blocksize = *value;
+                }
+                else
+                {
+                    LogMsg(Logger::Info,
+                            "BlockSize not set, use default");
+                }
+            }
+            const auto modeIter = mountpoint.value().find("Mode");
+            if (modeIter != mountpoint.value().cend())
+            {
+                const uint64_t* value =
+                    modeIter->get_ptr<const uint64_t*>();
+                if (value)
+                {
+                    if (*value == 0)
+                    {
+                        mp.mode = Configuration::Mode::proxy;
+                    }
+                    else if (*value == 1)
+                    {
+                        mp.mode = Configuration::Mode::legacy;
+                    }
+                    else
+                    {
+                        LogMsg(Logger::Error,
+                                "Incorrect Mode, skip this mount point");
+                        continue;
+                    }
+                }
+                else
+                {
+                    LogMsg(Logger::Error,
+                            "Mode not set, skip this mount point");
+                    continue;
+                }
+            }
+            else
+            {
+                LogMsg(Logger::Error,
+                        "Mode does not exist, skip this mount point");
+                continue;
+            }
+            mountPoints[mountpoint.key()] = std::move(mp);
+        }
+    }
+
     bool setupVariables(const nlohmann::json& config)
     {
 
         for (const auto& item : config.items())
         {
-            if (item.key() == "MountPoints")
-            {
-                for (const auto& mountpoint : item.value().items())
-                {
-                    MountPoint mp;
-                    const auto nbdDeviceIter =
-                        mountpoint.value().find("NBDDevice");
-                    if (nbdDeviceIter != mountpoint.value().cend())
-                    {
-                        const std::string* value =
-                            nbdDeviceIter->get_ptr<const std::string*>();
-                        if (value)
-                        {
-                            mp.nbdDevice = NBDDevice(value->c_str());
-                            if (!mp.nbdDevice)
-                            {
-                                LogMsg(Logger::Error,
-                                       "NBDDevice unrecognized.");
-                                continue;
-                            }
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Error,
-                                   "NBDDevice required, not set");
-                            continue;
-                        }
-                    };
-                    const auto unixSocketIter =
-                        mountpoint.value().find("UnixSocket");
-                    if (unixSocketIter != mountpoint.value().cend())
-                    {
-                        const std::string* value =
-                            unixSocketIter->get_ptr<const std::string*>();
-                        if (value)
-                        {
-                            mp.unixSocket = *value;
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Error,
-                                   "UnixSocket required, not set");
-                            continue;
-                        }
-                    }
-                    const auto endPointIdIter =
-                        mountpoint.value().find("EndpointId");
-                    if (endPointIdIter != mountpoint.value().cend())
-                    {
-                        const std::string* value =
-                            endPointIdIter->get_ptr<const std::string*>();
-                        if (value)
-                        {
-                            mp.endPointId = *value;
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Info,
-                                   "EndpointId required, not set");
-                            continue;
-                        }
-                    }
-                    const auto timeoutIter = mountpoint.value().find("Timeout");
-                    if (timeoutIter != mountpoint.value().cend())
-                    {
-                        const uint64_t* value =
-                            timeoutIter->get_ptr<const uint64_t*>();
-                        if (value)
-                        {
-                            mp.timeout = *value;
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Info,
-                                   "Timeout not set, use default");
-                        }
-                    }
-                    const auto blocksizeIter =
-                        mountpoint.value().find("BlockSize");
-                    if (blocksizeIter != mountpoint.value().cend())
-                    {
-                        const uint64_t* value =
-                            blocksizeIter->get_ptr<const uint64_t*>();
-                        if (value)
-                        {
-                            mp.blocksize = *value;
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Info,
-                                   "BlockSize not set, use default");
-                        }
-                    }
-                    const auto modeIter = mountpoint.value().find("Mode");
-                    if (modeIter != mountpoint.value().cend())
-                    {
-                        const uint64_t* value =
-                            modeIter->get_ptr<const uint64_t*>();
-                        if (value)
-                        {
-                            if (*value == 0)
-                            {
-                                mp.mode = Configuration::Mode::proxy;
-                            }
-                            else if (*value == 1)
-                            {
-                                mp.mode = Configuration::Mode::legacy;
-                            }
-                            else
-                            {
-                                LogMsg(Logger::Error,
-                                       "Incorrect Mode, skip this mount point");
-                                continue;
-                            }
-                        }
-                        else
-                        {
-                            LogMsg(Logger::Error,
-                                   "Mode not set, skip this mount point");
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        LogMsg(Logger::Error,
-                               "Mode does not exist, skip this mount point");
-                        continue;
-                    }
-                    mountPoints[mountpoint.key()] = std::move(mp);
-                }
+            switch (item.key()) {
+                case "MountPoints":
+                    parseMountPoints(item.value().items())
+                    break;
+                case "UdcDeviceName":
+                    udcDeviceName = item.value().dump();
+                    break;
+                default:
+                    LogMsg(Logger::Info,
+                            "Unknown configuration item: ", item.key());
+                    break;
             }
         }
         return true;

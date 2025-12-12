@@ -43,7 +43,7 @@ class App
         for (const auto& [name, entry] : config.mountPoints)
         {
             mpsm[name] = std::make_shared<MountPointStateMachine>(
-                ioc, devMonitor, name, entry, bus);
+                ioc, devMonitor, name, config.udcDeviceName, entry, bus);
             mpsm[name]->emitRegisterDBusEvent(objServer);
         }
 

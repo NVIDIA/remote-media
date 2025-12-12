@@ -498,13 +498,13 @@ class FsHelper
 struct UsbGadget : private FsHelper
 {
   public:
-    static int32_t configure(const std::string& name, const NBDDevice& nbd,
+    static int32_t configure(const std::string& name, const std::string& udcDeviceName, const NBDDevice& nbd,
                              StateChange change, const bool rw = false)
     {
-        return configure(name, nbd.to_path(), change, rw);
+        return configure(name, udcDeviceName, nbd.to_path(), change, rw);
     }
 
-    static int32_t configure(const std::string& name, const fs::path& path,
+    static int32_t configure(const std::string& name, const std::string& udcDeviceName, const fs::path& path,
                              StateChange change, const bool rw = false)
     {
         LogMsg(Logger::Info, "[App]: Configure USB Gadget (name=", name,
@@ -550,7 +550,7 @@ struct UsbGadget : private FsHelper
                 echoToFile(funcMassStorageDir / "lun.0/file", path);
 
                 for (const auto& port : fs::directory_iterator(
-                         "/sys/bus/platform/devices/1e6a0000.usb-vhub"))
+                         "/sys/bus/platform/devices/" + udcDeviceName))
                 {
                     if (fs::is_directory(port) && !fs::is_symlink(port))
                     {

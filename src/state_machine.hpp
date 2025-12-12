@@ -914,7 +914,7 @@ struct MountPointStateMachine
             if (devState == StateChange::inserted)
             {
                 int32_t ret = UsbGadget::configure(
-                    state.machine.name, state.machine.config.nbdDevice,
+                    state.machine.name, state.machine.udcDeviceName, state.machine.config.nbdDevice,
                     devState,
                     state.machine.target ? state.machine.target->rw : false);
                 if (ret == 0)
@@ -960,7 +960,7 @@ struct MountPointStateMachine
     // Helper functions
     bool removeUsbGadget(const BasicState& state)
     {
-        int32_t ret = UsbGadget::configure(state.machine.name,
+        int32_t ret = UsbGadget::configure(state.machine.name, state.machine.udcDeviceName,
                                            state.machine.config.nbdDevice,
                                            StateChange::removed);
         if (ret != 0)
@@ -983,6 +983,7 @@ struct MountPointStateMachine
 
     MountPointStateMachine(boost::asio::io_context& ioc,
                            DeviceMonitor& devMonitor, const std::string& name,
+                           std::string& udcDeviceName,
                            const Configuration::MountPoint& config,
                            std::shared_ptr<sdbusplus::asio::connection>& bus) :
         ioc{ioc},
@@ -997,6 +998,7 @@ struct MountPointStateMachine
         {
             state = std::move(machine.state);
             name = std::move(machine.name);
+            udcDeviceName = std::move(machine.udcDeviceName);
             ioc = machine.ioc;
             config = std::move(machine.config);
             target = std::move(machine.target);
@@ -1064,6 +1066,7 @@ struct MountPointStateMachine
 
     std::reference_wrapper<boost::asio::io_context> ioc;
     std::string name;
+    std::string udcDeviceName;
     Configuration::MountPoint config;
 
     std::optional<Target> target;
