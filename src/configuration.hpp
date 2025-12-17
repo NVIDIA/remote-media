@@ -35,6 +35,7 @@ class Configuration
         std::optional<int> timeout;
         std::optional<int> blocksize;
         Mode mode;
+        std::vector<std::string> allowedLocalMountPoints;
 
         static std::vector<std::string> toArgs(const MountPoint& mp)
         {
@@ -59,7 +60,7 @@ class Configuration
 
     bool valid = false;
     boost::container::flat_map<std::string, MountPoint> mountPoints;
-
+    
     Configuration(const std::string& file)
     {
         valid = loadConfiguration(file);
@@ -225,10 +226,54 @@ class Configuration
                                "Mode does not exist, skip this mount point");
                         continue;
                     }
+
+                    const auto allowedLocalMountPointIter =
+                    mountpoint.value().find("AllowedLocalMountPoints");
+
+                    if (allowedLocalMountPointIter != mountpoint.value().cend())
+                    {
+                        if (allowedLocalMountPointIter->is_array())
+                        {
+                            for (const auto& path : *allowedLocalMountPointIter)
+                            {
+                                const std::string* value = path.get_ptr<const std::string*>();
+                                if (value)
+                                {
+                                    updateAllowedLocalMountPoints(mp, *value);
+                                }
+                            }
+                        }
+                        else if (allowedLocalMountPointIter->is_string())
+                        {
+                            const std::string* value =
+                                allowedLocalMountPointIter->get_ptr<const std::string*>();
+                            if (value)
+                            {
+                                updateAllowedLocalMountPoints(mp, *value);
+                            }
+                        }
+                    }
+
                     mountPoints[mountpoint.key()] = std::move(mp);
                 }
             }
         }
         return true;
+    }
+    void updateAllowedLocalMountPoints(MountPoint& mp,const std::string& path)
+    {
+        if (path.back() != fs::path::preferred_separator)
+        {
+            //add a trailing slash to the path
+            std::string normalizedPath = path;
+            normalizedPath += fs::path::preferred_separator;
+            mp.allowedLocalMountPoints.push_back(normalizedPath);
+        }
+        else
+        {
+            mp.allowedLocalMountPoints.push_back(path);
+        }
+        
+        
     }
 };

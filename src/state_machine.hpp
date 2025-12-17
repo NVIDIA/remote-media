@@ -654,6 +654,10 @@ struct MountPointStateMachine
             {
                 return mountHttpsShare(state);
             }
+            else if (isFileUrl(state.machine.target->imgUrl))
+            {
+                return mountLocalFile(state);
+            }
 
             return ReadyState(state, std::errc::invalid_argument,
                               "URL not recognized");
@@ -714,6 +718,92 @@ struct MountPointStateMachine
             auto newState = WaitingForGadgetState(state);
             newState.process = process;
             return newState;
+        }
+
+        State mountLocalFile(const ActivatingState& state)
+        {
+            auto& machine = state.machine;
+            
+            fs::path imagePath = getImagePath(state.machine.target->imgUrl);
+            
+            // Open file using the file descriptor to avoid TOCTOU issues
+            int fd = open(imagePath.c_str(), O_RDONLY);
+            if (fd < 0)
+            {
+                LogMsg(Logger::Error, machine.name, 
+                    " Failed to open file: ", imagePath, 
+                    " errno: ", errno);
+                return ReadyState(state, std::errc::no_such_file_or_directory,
+                                "Failed to open local file");
+            }
+
+            State newState = mountFd(state, fd);
+            close(fd);
+            return newState;
+        }
+
+        State mountFd(const ActivatingState& state, int fd)
+        {
+            auto& machine = state.machine;
+             struct stat st;
+             if (fstat(fd, &st) != 0)
+             {
+                 LogMsg(Logger::Error, machine.name, " fstat failed");
+                 return ReadyState(state, std::errc::io_error, "Failed to stat file");
+             }
+             
+             // Check it's a regular file (the symlink TARGET must be a regular file)
+             if (!S_ISREG(st.st_mode))
+             {
+                 LogMsg(Logger::Error, machine.name,
+                     " Not a regular file: ");
+                 return ReadyState(state, std::errc::invalid_argument,
+                                 "Path is not a regular file");
+             }
+ 
+             //get the canonical path, resolve symbolic links
+             std::error_code ec;
+             fs::path localFile = fs::canonical(
+                 fs::path("/proc/self/fd") / std::to_string(fd), 
+                 ec
+             );
+             if (ec)
+             {
+                 LogMsg(Logger::Error, machine.name,
+                        " Failed to canonicalize path (broken symlink?): ", " error: ", ec.message());
+                 return ReadyState(state, std::errc::invalid_argument,
+                                   "Failed to canonicalize path");
+             }
+ 
+             if (!isLocalMountPointAllowed(state,localFile.string()))
+             {
+                 LogMsg(Logger::Error, machine.name,
+                        " Mount point not allowed: ", localFile);
+                 return ReadyState(state, std::errc::invalid_argument,
+                                   "Local file is not a valid mount point");
+             }
+ 
+             LogMsg(Logger::Debug, machine.name,
+                    " Mounting local file: ", localFile);
+ 
+             if (machine.target->rw)
+             {
+                 LogMsg(Logger::Warning, machine.name,
+                        " Mounting a local file in read-write mode is not allowed, mounting in read-only mode");
+                 machine.target->rw = false;
+             }
+                    
+             // Use nbdkit file plugin to serve the local file
+             auto process = spawnNbdKit(machine, fd);
+             if (!process)
+             {
+                 return ReadyState(state, std::errc::invalid_argument,
+                                   "Failed to mount local file");
+             }
+ 
+             auto newState = WaitingForGadgetState(state);
+             newState.process = process;
+             return newState;
         }
 
         static std::shared_ptr<Process>
@@ -801,6 +891,16 @@ struct MountPointStateMachine
         }
 
         static std::shared_ptr<Process>
+        spawnNbdKit(MountPointStateMachine& machine, const int fd)
+        {
+            return spawnNbdKit(machine, {},
+                            {// Use file plugin ...
+                                "file",
+                                // ... file descriptor at this location
+                                "fd=" + std::to_string(fd)});
+        }
+
+        static std::shared_ptr<Process>
             spawnNbdKit(MountPointStateMachine& machine, const std::string& url)
         {
             std::unique_ptr<utils::VolatileFile> secret;
@@ -857,7 +957,7 @@ struct MountPointStateMachine
             }
             else
             {
-                LogMsg(Logger::Error, "Provied url does not match scheme");
+                LogMsg(Logger::Error, "Provided url does not match scheme:", urlScheme);
                 return false;
             }
         }
@@ -884,6 +984,17 @@ struct MountPointStateMachine
             return getImagePathFromUrl("smb://", imageUrl, imagePath);
         }
 
+        bool isFileUrl(const std::string& imageUrl)
+        {
+            return checkUrl("file://", imageUrl);
+        }
+
+        bool getImagePathFromFileUrl(const std::string& imageUrl,
+                                       std::string* imagePath)
+        {
+            return getImagePathFromUrl("file://", imageUrl, imagePath);
+        }
+
         fs::path getImagePath(const std::string& imageUrl)
         {
             std::string imagePath;
@@ -896,11 +1007,29 @@ struct MountPointStateMachine
             {
                 return fs::path(imagePath);
             }
+            else if (getImagePathFromFileUrl(imageUrl, &imagePath))
+            {
+                return fs::path(imagePath);
+            }
             else
             {
                 LogMsg(Logger::Error, "Unrecognized url's scheme encountered");
                 return fs::path("");
             }
+        }
+
+        bool isLocalMountPointAllowed(const ActivatingState& state,const std::string& filePath) const
+        {
+            for (const auto& allowedMountPoint : state.machine.config.allowedLocalMountPoints)
+            {
+                if (filePath.starts_with(allowedMountPoint))
+                {
+                    return true;
+                }
+            }
+            LogMsg(Logger::Error, state.machine.name,
+                " Mount point not allowed: ", filePath);
+            return false;
         }
     };
 
