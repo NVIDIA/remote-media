@@ -7,6 +7,7 @@
 #include "utils.hpp"
 
 #include <sys/mount.h>
+#include <sys/stat.h> 
 
 #include <phosphor-logging/redfish_event_log.hpp>
 #include <sdbusplus/asio/object_server.hpp>
@@ -736,6 +737,24 @@ struct MountPointStateMachine
                 return ReadyState(state, std::errc::no_such_file_or_directory,
                                 "Failed to open local file");
             }
+
+            struct stat st;
+            if (fstat(fd, &st) < 0) {
+                LogMsg(Logger::Error, machine.name, 
+                    " Failed to stat file: ", imagePath, 
+                    " errno: ", errno);
+                return ReadyState(state, std::errc::io_error,
+                    "Failed to stat local file");
+            }
+            off_t fileSize = st.st_size; 
+            if (fileSize == 0) {
+                LogMsg(Logger::Error, machine.name, 
+                    " File is empty: ", imagePath);
+                close(fd);
+                return ReadyState(state, std::errc::invalid_argument,
+                    "File is empty");
+            }
+            
 
             State newState = mountFd(state, fd);
             close(fd);

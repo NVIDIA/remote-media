@@ -5,7 +5,7 @@
             "EndpointId": "",
             "Mode": 0,
             "NBDDevice": "nbd0",
-            "UnixSocket": "/tmp/nbd0.sock",
+            "UnixSocket": "/run/virtual-media/nbd0.sock",
             "Timeout": 30,
             "BlockSize": 512
         },
@@ -13,7 +13,7 @@
             "EndpointId": "",
             "Mode": 1,
             "NBDDevice": "nbd2",
-            "UnixSocket": "/tmp/nbd2.sock",
+            "UnixSocket": "/run/virtual-media/nbd2.sock",
             "Timeout": 30,
             "BlockSize": 512
         },
@@ -21,7 +21,7 @@
             "EndpointId": "",
             "Mode": 1,
             "NBDDevice": "nbd3",
-            "UnixSocket": "/tmp/nbd3.sock",
+            "UnixSocket": "/run/virtual-media/nbd3.sock",
             "Timeout": 30,
             "BlockSize": 512
         }

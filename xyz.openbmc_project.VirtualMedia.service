@@ -1,11 +1,14 @@
 [Unit]
 Description=Virtual Media Service
 After=dbus.service
+Requires=dbus.service
 
 [Service]
+RuntimeDirectory=virtual-media
 ExecStart=/usr/sbin/virtual-media
 Restart=always
-Type=simple
+Type=dbus
+BusName=xyz.openbmc_project.VirtualMedia
 
 [Install]
 WantedBy=multi-user.target

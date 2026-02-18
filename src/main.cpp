@@ -67,11 +67,57 @@ class App
     const Configuration& config;
 };
 
+/*check if the unix socket path end with .sock and the path is in the runtime directory
+  or if no directory is provided, add the runtime directory
+*/
+bool validateSocketPath(Configuration& config)
+{
+    const char* runtimeDir = std::getenv("RUNTIME_DIRECTORY");
+    if(!(runtimeDir && runtimeDir[0])) 
+    {
+        LogMsg(Logger::Error, "RUNTIME_DIRECTORY is not set");
+        return false;
+    }
+    
+    for (auto& [name, entry] : config.mountPoints)
+    {
+        LogMsg(Logger::Info, "Unix socket: ", entry.unixSocket);
+        if (!entry.unixSocket.ends_with(".sock"))
+        {
+            LogMsg(Logger::Error, "Unix socket ", entry.unixSocket, " must end with .sock");
+            return false;
+        }
+       std::filesystem::path path = entry.unixSocket;
+       std::filesystem::path parentPath = path.parent_path();
+       if (parentPath.empty())
+       {
+           entry.unixSocket = std::string(runtimeDir) + "/" + entry.unixSocket;
+       }
+       else if (parentPath != runtimeDir)
+       {
+            LogMsg(Logger::Error, "Unix socket ", entry.unixSocket, "dir must be ", runtimeDir);
+            return false;
+       }
+    }
+    
+    return true;
+}
+
 int main()
 {
     Configuration config("/etc/virtual-media.json");
     if (!config.valid)
+    {
+        LogMsg(Logger::Error, "Invalid configuration file,exiting");
         return -1;
+    }
+
+    if (!validateSocketPath(config))
+    {
+        LogMsg(Logger::Error, "Invalid socket path configuration,exiting");
+        return -1;
+    }
+        
 
     boost::asio::io_context ioc;
     boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
