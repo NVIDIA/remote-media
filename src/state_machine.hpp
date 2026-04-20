@@ -475,6 +475,27 @@ struct MountPointStateMachine
                             // Second 'part', after NULL delimiter
                             std::string pass(buf.begin() + user.length() + 1);
 
+                            // Reject characters that would allow CIFS mount
+                            // option injection: a comma terminates the current
+                            // key=value token, an equals sign introduces a
+                            // spurious key, and newlines break credential-file
+                            // parsers (e.g. the CIFS "credentials=" option).
+                            auto hasInjectionChars =
+                                [](const std::string& s) {
+                                return s.find_first_of(",=\n\r") !=
+                                       std::string::npos;
+                            };
+                            if (hasInjectionChars(user) ||
+                                hasInjectionChars(pass))
+                            {
+                                utils::secureCleanup(user);
+                                utils::secureCleanup(pass);
+                                utils::secureCleanup(buf);
+                                throw sdbusplus::exception::SdBusError(
+                                    EINVAL,
+                                    "Credentials contain invalid characters");
+                            }
+
                             // Encapsulate credentials into safe buffer
                             machine.target->credentials =
                                 std::make_unique<utils::CredentialsProvider>(
