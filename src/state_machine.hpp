@@ -309,7 +309,8 @@ struct MountPointStateMachine
                     return -1;
                 },
                 [&machine = state.machine](const std::string& property) {
-                    if (std::get_if<ActiveState>(&machine.state))
+                    if (std::get_if<ActiveState>(&machine.state) &&
+                        machine.target)
                     {
                         return std::string(machine.target->imgUrl);
                     }
@@ -338,13 +339,22 @@ struct MountPointStateMachine
                 "WriteProtected", bool(true),
                 [](const bool& req, bool& property) { return 0; },
                 [&machine = state.machine](const bool& property) {
-                    if (!machine.target->rw)
+                    if (std::get_if<ActiveState>(&machine.state) &&
+                        machine.target)
                     {
-                        return true;
+                        if (!machine.target->rw)
+                        {
+                            return true;
+                        }
+                        else
+                        {
+                            return false;
+                        }
                     }
                     else
                     {
-                        return false;
+                        // Default to read-only when no active session.
+                        return true;
                     }
                 });
 

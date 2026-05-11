@@ -588,6 +588,17 @@ struct UsbGadget : private FsHelper
 
         const std::string gadgetPath =
             "/sys/kernel/config/usb_gadget/mass-storage-" + name;
+
+        try
+        {
+            echoToFile(fs::path(gadgetPath) / "UDC", "");
+        }
+        catch (std::ofstream::failure& e)
+        {
+            LogMsg(Logger::Debug,
+                   "[App]: UsbGadget UDC unbind: ", e.what());
+        }
+
         const std::string removeMassStorageDir =
             "rm " + gadgetPath + "/configs/c.1/mass_storage.usb0";
         const std::string removeFuncMassStorageDir =
