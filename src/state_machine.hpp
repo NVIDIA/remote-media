@@ -1123,6 +1123,43 @@ struct MountPointStateMachine
             return state;
         }
 
+        State operator()(const WaitingForProcessEndState& state)
+        {
+            // During unmount we tear down the gadget before the served
+            // process has fully exited, so the "removed" udev notification
+            // is expected to arrive while we are already waiting for the
+            // process to end. Treat only that as a no-op; any other event
+            // in this state is genuinely unexpected and must still raise the
+            // transition-error diagnostic.
+            if (devState == StateChange::removed)
+            {
+                LogMsg(Logger::Debug, state.machine.name,
+                       " Gadget removal udev event received during teardown; "
+                       "expected while waiting for process to end");
+                return state;
+            }
+            transitionError(eventName, state);
+            return state;
+        }
+
+        State operator()(const ActiveState& state)
+        {
+            // A "removed" udev event can race ahead of the explicit unmount
+            // path (e.g. the served process drops the device). That is the
+            // normal precursor to teardown; any other event while active is
+            // unexpected and must still raise the transition-error
+            // diagnostic.
+            if (devState == StateChange::removed)
+            {
+                LogMsg(Logger::Debug, state.machine.name,
+                       " Gadget removal udev event received while active; "
+                       "expected ahead of teardown");
+                return state;
+            }
+            transitionError(eventName, state);
+            return state;
+        }
+
         template <typename AnyState>
         State operator()(const AnyState& state)
         {
