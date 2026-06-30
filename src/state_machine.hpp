@@ -2,6 +2,7 @@
 
 #include "configuration.hpp"
 #include "logger.hpp"
+#include "persistence.hpp"
 #include "smb.hpp"
 #include "system.hpp"
 #include "utils.hpp"
@@ -17,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <variant>
@@ -35,6 +37,11 @@ struct MountPointStateMachine
         std::errc code;
         std::string message;
     };
+
+    // ReadyState error when a local file is outside AllowedLocalMountPoints.
+    // Startup replay matches on it to drop the saved mount.
+    static constexpr std::string_view localMountNotAllowedError =
+        "Local file is not a valid mount point";
 
     struct BasicState
     {
@@ -144,6 +151,40 @@ struct MountPointStateMachine
         {}
         ActiveState(const WaitingForGadgetState& state) :
             BasicState(state, __FUNCTION__), process{state.process} {};
+
+        virtual void onEnter() override
+        {
+            // Persistence hook #2 : on every successful
+            // transition to Active, save state for slots that have opted
+            // into BMC-reboot persistence.
+            //
+            // Eligibility is decided STRUCTURALLY by
+            // the presence of AllowedLocalMountPoints in virtual-media.json
+            // — those slots are "durable platform image slots" (today only
+            // BF4 IMAGE/CONFIG). General slots (Ironic USB1/USB2 etc.)
+            // leave the array empty and therefore stay ephemeral with no
+            // extra per-slot toggle.
+            //
+            // The write is best-effort: a persistence failure must NOT
+            // fail the mount the user just requested. We also rewrite on
+            // the startup-replay path — the content is identical to what
+            // we just loaded, and rewriting is the simplest way to
+            // self-heal a partially written file from a previous boot.
+            const bool slotOptedIn =
+                !machine.config.allowedLocalMountPoints.empty();
+            // file:// only. Remote https:// / smb:// persistence waits for
+            // Redfish EjectPolicy: Persistent; replaying it here would also
+            // lose VerifyCertificate and race a concurrent Mount.
+            const bool persistable =
+                machine.target &&
+                persistence::isPersistableUrl(machine.target->imgUrl);
+            if (slotOptedIn && persistable)
+            {
+                persistence::writeState(machine.name,
+                                        machine.target->imgUrl,
+                                        machine.target->rw);
+            }
+        }
 
         std::weak_ptr<Process> process;
     };
@@ -473,7 +514,7 @@ struct MountPointStateMachine
                         LogMsg(Logger::Info, "[App]: Mount called on ",
                                getObjectPath(machine), machine.name);
 
-                        machine.target = {imgUrl, rw};
+                        std::unique_ptr<utils::CredentialsProvider> credentials;
 
                         if (std::holds_alternative<unix_fd>(fd))
                         {
@@ -526,13 +567,26 @@ struct MountPointStateMachine
                             }
 
                             // Encapsulate credentials into safe buffer
-                            machine.target->credentials =
+                            credentials =
                                 std::make_unique<utils::CredentialsProvider>(
                                     std::move(user), std::move(pass));
 
                             // Cover the tracks
                             utils::secureCleanup(buf);
                         }
+
+                        // machine.target belongs to whichever mount is in
+                        // flight (e.g. a startup replay) until the slot is
+                        // back in ReadyState, and ActiveState::onEnter()
+                        // persists it. Check, assign and emit must not be
+                        // separated by a yield.
+                        if (!std::get_if<ReadyState>(&machine.state))
+                        {
+                            throw sdbusplus::exception::SdBusError(
+                                EPERM, "Could not mount on not empty slot");
+                        }
+                        machine.target = {imgUrl, rw};
+                        machine.target->credentials = std::move(credentials);
 
                         try
                         {
@@ -587,10 +641,16 @@ struct MountPointStateMachine
         {}
         State operator()(const ActivatingState& state)
         {
+            // Persistence hook #3: explicit D-Bus Unmount (EjectMedia) clears
+            // saved state. SubprocessStoppedEvent intentionally does NOT call
+            // clearState(), so a crash leaves the descriptor for startup replay.
+            // clearState on a never-persisted slot is a cheap no-op.
+            persistence::clearState(state.machine.name);
             return ReadyState(state);
         }
         State operator()(const WaitingForGadgetState& state)
         {
+            persistence::clearState(state.machine.name);
             state.machine.stopProcess(state.process);
             return WaitingForProcessEndState(state);
         }
@@ -601,6 +661,7 @@ struct MountPointStateMachine
                 return ReadyState(state, std::errc::device_or_resource_busy,
                                   "Unable to unmount gadget");
             }
+            persistence::clearState(state.machine.name);
             state.machine.stopProcess(state.process);
             // send an event
             auto dbusObjectPath = state.machine.getObjectPath() + state.machine.name;
@@ -718,15 +779,15 @@ struct MountPointStateMachine
                 " Mount requested on address: ", state.machine.target->imgUrl,
                 " ; RW: ", state.machine.target->rw);
 
-            if (isCifsUrl(state.machine.target->imgUrl))
+            if (utils::isCifsUrl(state.machine.target->imgUrl))
             {
                 return mountSmbShare(state);
             }
-            else if (isHttpsUrl(state.machine.target->imgUrl))
+            else if (utils::isHttpsUrl(state.machine.target->imgUrl))
             {
                 return mountHttpsShare(state);
             }
-            else if (isFileUrl(state.machine.target->imgUrl))
+            else if (utils::isFileUrl(state.machine.target->imgUrl))
             {
                 return mountLocalFile(state);
             }
@@ -870,7 +931,7 @@ struct MountPointStateMachine
                  LogMsg(Logger::Error, machine.name,
                         " Mount point not allowed: ", localFile);
                  return ReadyState(state, std::errc::invalid_argument,
-                                   "Local file is not a valid mount point");
+                                   std::string{localMountNotAllowedError});
              }
  
              LogMsg(Logger::Debug, machine.name,
@@ -1062,17 +1123,11 @@ struct MountPointStateMachine
             return spawnNbdKit(machine, std::move(secret), params);
         }
 
-        bool checkUrl(const std::string& urlScheme, const std::string& imageUrl)
+        static bool getImagePathFromUrl(const std::string& urlScheme,
+                                        const std::string& imageUrl,
+                                        std::string* imagePath)
         {
-            return (urlScheme.compare(imageUrl.substr(0, urlScheme.size())) ==
-                    0);
-        }
-
-        bool getImagePathFromUrl(const std::string& urlScheme,
-                                 const std::string& imageUrl,
-                                 std::string* imagePath)
-        {
-            if (checkUrl(urlScheme, imageUrl))
+            if (utils::matchesUrlScheme(urlScheme, imageUrl))
             {
                 if (imagePath != nullptr)
                 {
@@ -1092,20 +1147,10 @@ struct MountPointStateMachine
             }
         }
 
-        bool isHttpsUrl(const std::string& imageUrl)
-        {
-            return checkUrl("https://", imageUrl);
-        }
-
         bool getImagePathFromHttpsUrl(const std::string& imageUrl,
                                       std::string* imagePath)
         {
             return getImagePathFromUrl("https://", imageUrl, imagePath);
-        }
-
-        bool isCifsUrl(const std::string& imageUrl)
-        {
-            return checkUrl("smb://", imageUrl);
         }
 
         bool getImagePathFromCifsUrl(const std::string& imageUrl,
@@ -1114,13 +1159,9 @@ struct MountPointStateMachine
             return getImagePathFromUrl("smb://", imageUrl, imagePath);
         }
 
-        bool isFileUrl(const std::string& imageUrl)
-        {
-            return checkUrl("file://", imageUrl);
-        }
-
-        bool getImagePathFromFileUrl(const std::string& imageUrl,
-                                       std::string* imagePath)
+        // Static so startup replay can resolve the same path the mount opens.
+        static bool getImagePathFromFileUrl(const std::string& imageUrl,
+                                            std::string* imagePath)
         {
             return getImagePathFromUrl("file://", imageUrl, imagePath);
         }
@@ -1383,7 +1424,6 @@ struct MountPointStateMachine
         std::optional<fs::path> mountDir;
         std::unique_ptr<utils::CredentialsProvider> credentials;
     };
-
     std::reference_wrapper<boost::asio::io_context> ioc;
     std::string name;
     Configuration::MountPoint config;

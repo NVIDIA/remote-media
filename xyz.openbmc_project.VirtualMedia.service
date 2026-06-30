@@ -7,6 +7,13 @@ Requires=dbus.service
 
 [Service]
 RuntimeDirectory=virtual-media
+# Durable per-service state directory for BMC-reboot persistence (Phase 1).
+# systemd creates /var/lib/virtual-media (and any nested path) owned by the
+# unit user, mode 0700, on first start and preserves it across reboots and
+# package upgrades. The path mirrors persistence::defaultStateDir in
+# src/persistence.hpp; keep the two in sync.
+StateDirectory=virtual-media/persist
+StateDirectoryMode=0700
 ExecStart=/usr/sbin/virtual-media
 Restart=always
 Type=dbus

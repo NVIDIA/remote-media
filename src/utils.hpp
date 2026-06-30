@@ -93,6 +93,71 @@ inline bool hasIsoExtension(std::string_view url)
                       });
 }
 
+// Shared URL-scheme helpers.
+//
+// Both the mount state machine and the reboot-persistence module classify an
+// image URL by scheme (file:// / https:// / smb://) and need to spot
+// URL-embedded credentials. Keeping one implementation here avoids the copies
+// drifting apart; callers wrap these under their own historical names.
+
+// Case-sensitive check that `imageUrl` begins with `scheme` (e.g. "https://").
+// substr(0, n) is always valid (it clamps to the string length), so a short or
+// empty URL simply fails to match instead of throwing.
+inline bool matchesUrlScheme(std::string_view scheme, std::string_view imageUrl)
+{
+    return imageUrl.substr(0, scheme.size()) == scheme;
+}
+
+// Does this URL target a local file (file:// scheme)?
+inline bool isFileUrl(std::string_view imageUrl)
+{
+    return matchesUrlScheme("file://", imageUrl);
+}
+
+// Does this URL target an HTTPS resource (https:// scheme)?
+inline bool isHttpsUrl(std::string_view imageUrl)
+{
+    return matchesUrlScheme("https://", imageUrl);
+}
+
+// Does this URL target an SMB/CIFS share (smb:// scheme)?
+inline bool isCifsUrl(std::string_view imageUrl)
+{
+    return matchesUrlScheme("smb://", imageUrl);
+}
+
+// Does this URL string carry embedded userinfo credentials in its authority
+// component, i.e. scheme://user[:pass]@host/...?
+//
+// The userinfo, if present, is the part before an '@' inside the authority
+// component (which starts right after "://" and ends at the first '/', '?' or
+// '#'). Restricting the search to the authority avoids false positives from an
+// '@' that legitimately appears later in a path, query, or fragment.
+inline bool hasEmbeddedUrlCredentials(std::string_view imageUrl)
+{
+    constexpr std::string_view schemeSep{"://"};
+    const auto schemePos = imageUrl.find(schemeSep);
+    if (schemePos == std::string_view::npos)
+    {
+        return false;
+    }
+    const auto authorityStart = schemePos + schemeSep.size();
+    const auto authorityEnd = imageUrl.find_first_of("/?#", authorityStart);
+    const auto authorityLen = (authorityEnd == std::string_view::npos)
+                                  ? std::string_view::npos
+                                  : authorityEnd - authorityStart;
+    return imageUrl.substr(authorityStart, authorityLen).find('@') !=
+           std::string_view::npos;
+}
+
+// Does this URL string carry a query or fragment component? For remote URLs
+// these may hold secret material (e.g. pre-signed ?token=... URLs), so callers
+// that store or log the URL must treat them as credential-bearing.
+inline bool hasUrlQueryOrFragment(std::string_view imageUrl)
+{
+    return imageUrl.find_first_of("?#") != std::string_view::npos;
+}
+
 template <typename T>
 static void secureCleanup(T& value)
 {

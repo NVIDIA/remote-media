@@ -19,6 +19,15 @@ option(VM_USE_VALGRIND "Build VirtualMedia to work with valgrind" OFF)
 
 option(VM_VERBOSE_NBDKIT_LOGS "Include detailed logs from nbdkit" OFF)
 
+# On by default for native (CI unit-test) builds so ctest runs the suite;
+# off for cross builds such as Yocto, which do not ship GoogleTest.
+if(CMAKE_CROSSCOMPILING)
+  set(BUILD_TESTS_DEFAULT OFF)
+else()
+  set(BUILD_TESTS_DEFAULT ON)
+endif()
+option(BUILD_TESTS "Build unit tests" ${BUILD_TESTS_DEFAULT})
+
 find_package (PkgConfig REQUIRED)
 
 pkg_check_modules (SYSTEMD libsystemd REQUIRED)
@@ -84,3 +93,17 @@ if (NOT DEFINED SYSTEMD_SYSTEM_UNIT_DIR)
 endif()
 install(FILES ${PROJECT_SOURCE_DIR}/xyz.openbmc_project.VirtualMedia.service
               DESTINATION "${SYSTEMD_SYSTEM_UNIT_DIR}")
+
+# Unit tests. The suite links nothing from the daemon and runs without
+# D-Bus/systemd/udev; it only needs the Boost and sdbusplus headers that
+# utils.hpp uses at compile time.
+if(BUILD_TESTS)
+  enable_testing()
+  find_package(GTest REQUIRED)
+
+  add_executable(test-persistence tests/test_persistence.cpp)
+  target_include_directories(test-persistence PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test-persistence GTest::gtest GTest::gtest_main)
+
+  add_test(NAME test-persistence COMMAND test-persistence)
+endif()
