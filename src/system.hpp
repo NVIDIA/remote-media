@@ -363,6 +363,7 @@ class Process : public std::enable_shared_from_this<Process>
     {}
 
     bool authFailure = false;
+    bool certFailure = false;
 
     template <typename ExitCb>
     bool spawn(const std::vector<std::string>& args, ExitCb&& onExit)
@@ -410,6 +411,19 @@ class Process : public std::enable_shared_from_this<Process>
                         {
                             self->authFailure = true;
                         }
+                        // Detect TLS certificate verification failure from the
+                        // nbdkit curl plugin. These errors occur before any HTTP
+                        // exchange when the server cert cannot be verified
+                        // (e.g. CA not installed in the BMC trust store).
+                        if (lineStr.find("SSL certificate problem") !=
+                                std::string::npos ||
+                            lineStr.find("SSL/TLS handshake failed") !=
+                                std::string::npos ||
+                            lineStr.find("certificate verify failed") !=
+                                std::string::npos)
+                        {
+                            self->certFailure = true;
+                        }
                         if (lineEnd == line.end())
                         {
                             break;
@@ -449,7 +463,7 @@ class Process : public std::enable_shared_from_this<Process>
                        " Native: ", self->child.native_exit_code());
 
                 onExit(self->child.exit_code(), self->dev.isReady(),
-                       self->authFailure);
+                       self->authFailure, self->certFailure);
             }, boost::asio::detached);
         return true;
     }
