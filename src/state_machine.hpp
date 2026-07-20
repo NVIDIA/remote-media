@@ -119,8 +119,9 @@ struct MountPointStateMachine
 
         virtual void onEnter()
         {
-            // Reset previous exit code
+            // Reset previous exit code and auth failure flag
             machine.exitCode = -1;
+            machine.authFailure = false;
 
             machine.emitActivationStartedEvent();
         }
@@ -614,6 +615,11 @@ struct MountPointStateMachine
         State operator()(const WaitingForGadgetState& state)
         {
             state.machine.stopProcess(state.process);
+            if (state.machine.authFailure)
+            {
+                return ReadyState(state, std::errc::invalid_argument,
+                                  "Invalid credentials");
+            }
             return ReadyState(state, std::errc::io_error,
                               "Process ended prematurely");
         }
@@ -657,9 +663,11 @@ struct MountPointStateMachine
             }
             if (!process->spawn(
                     Configuration::MountPoint::toArgs(state.machine.config),
-                    [&machine = state.machine](int exitCode, bool isReady) {
+                    [&machine = state.machine](int exitCode, bool isReady,
+                                               bool authFailure) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
+                        machine.authFailure = authFailure;
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -916,9 +924,10 @@ struct MountPointStateMachine
 
             if (!process->spawn(
                     args, [&machine = machine, secret = std::move(secret)](
-                              int exitCode, bool isReady) {
+                              int exitCode, bool isReady, bool authFailure) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
+                        machine.authFailure = authFailure;
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -1202,7 +1211,7 @@ struct MountPointStateMachine
                            const Configuration::MountPoint& config,
                            std::shared_ptr<sdbusplus::asio::connection>& bus) :
         ioc{ioc},
-        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}, bus(bus)
+        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}, authFailure{false}, bus(bus)
     {
         devMonitor.addDevice(config.nbdDevice);
     }
@@ -1285,6 +1294,7 @@ struct MountPointStateMachine
     std::optional<Target> target;
     State state;
     int exitCode;
+    bool authFailure;
     const std::string proxyObjectPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
     const std::string legacyObjectPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
     std::shared_ptr<sdbusplus::asio::connection>& bus;
