@@ -362,6 +362,8 @@ class Process : public std::enable_shared_from_this<Process>
         pipe(ioc), name(name), app(app), dev(dev)
     {}
 
+    bool authFailure = false;
+
     template <typename ExitCb>
     bool spawn(const std::vector<std::string>& args, ExitCb&& onExit)
     {
@@ -395,8 +397,19 @@ class Process : public std::enable_shared_from_this<Process>
                     while (lineBegin != line.end())
                     {
                         auto lineEnd = find(lineBegin, line.end(), '\n');
+                        std::string lineStr(lineBegin, lineEnd);
                         LogMsg(Logger::Debug, "[Process]: (", self->name, ") ",
-                               std::string(lineBegin, lineEnd));
+                               lineStr);
+                        // Detect HTTP 401/403 from the nbdkit curl plugin
+                        // output ("returned error: NNN"). This is best-effort;
+                        // the substring is nbdkit-specific and may change.
+                        if (lineStr.find("returned error: 401") !=
+                                std::string::npos ||
+                            lineStr.find("returned error: 403") !=
+                                std::string::npos)
+                        {
+                            self->authFailure = true;
+                        }
                         if (lineEnd == line.end())
                         {
                             break;
@@ -435,7 +448,8 @@ class Process : public std::enable_shared_from_this<Process>
                        " EC: ", self->child.exit_code(),
                        " Native: ", self->child.native_exit_code());
 
-                onExit(self->child.exit_code(), self->dev.isReady());
+                onExit(self->child.exit_code(), self->dev.isReady(),
+                       self->authFailure);
             }, boost::asio::detached);
         return true;
     }
