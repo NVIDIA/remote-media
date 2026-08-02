@@ -119,9 +119,10 @@ struct MountPointStateMachine
 
         virtual void onEnter()
         {
-            // Reset previous exit code and auth failure flag
+            // Reset previous exit code and failure flags
             machine.exitCode = -1;
             machine.authFailure = false;
+            machine.certFailure = false;
 
             machine.emitActivationStartedEvent();
         }
@@ -334,6 +335,23 @@ struct MountPointStateMachine
                         return machine.target->credentials->user();
                     }
                     return std::string("");
+                });
+            iface->register_property(
+                "VerifyCertificate", bool(false),
+                [&machine = state.machine](const bool& req, bool& property) {
+                    if (!std::get_if<ReadyState>(&machine.state))
+                    {
+                        LogMsg(Logger::Error, machine.name,
+                               " VerifyCertificate cannot be changed while"
+                               " mount is in progress or media is mounted");
+                        return -EPERM;
+                    }
+                    property = req;
+                    machine.verifyCertificate = req;
+                    return 1;
+                },
+                [&machine = state.machine](const bool& property) {
+                    return machine.verifyCertificate;
                 });
             iface->register_property(
                 "WriteProtected", bool(true),
@@ -614,10 +632,22 @@ struct MountPointStateMachine
         State operator()(const WaitingForGadgetState& state)
         {
             state.machine.stopProcess(state.process);
+            // authFailure/certFailure share the invalid_argument errc (both
+            // are caller-fixable, not server-side faults), but the message
+            // strings differ and that message is what actually reaches the
+            // operator: it's logged via the ReadyState(ec, message) ctor
+            // above and also propagated verbatim as the D-Bus error message
+            // in handleMount(), so "TLS certificate verification failed" is
+            // distinguishable from "Invalid credentials" end-to-end.
             if (state.machine.authFailure)
             {
                 return ReadyState(state, std::errc::invalid_argument,
                                   "Invalid credentials");
+            }
+            if (state.machine.certFailure)
+            {
+                return ReadyState(state, std::errc::invalid_argument,
+                                  "TLS certificate verification failed");
             }
             return ReadyState(state, std::errc::io_error,
                               "Process ended prematurely");
@@ -663,10 +693,12 @@ struct MountPointStateMachine
             if (!process->spawn(
                     Configuration::MountPoint::toArgs(state.machine.config),
                     [&machine = state.machine](int exitCode, bool isReady,
-                                               bool authFailure) {
+                                               bool authFailure,
+                                               bool certFailure) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
                         machine.authFailure = authFailure;
+                        machine.certFailure = certFailure;
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -933,10 +965,12 @@ struct MountPointStateMachine
 
             if (!process->spawn(
                     args, [&machine = machine, secret = std::move(secret)](
-                              int exitCode, bool isReady, bool authFailure) {
+                              int exitCode, bool isReady, bool authFailure,
+                              bool certFailure) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
                         machine.authFailure = authFailure;
+                        machine.certFailure = certFailure;
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -972,11 +1006,38 @@ struct MountPointStateMachine
             spawnNbdKit(MountPointStateMachine& machine, const std::string& url)
         {
             std::unique_ptr<utils::VolatileFile> secret;
+
+            const bool verify = machine.verifyCertificate;
+            if (!verify)
+            {
+                LogMsg(Logger::Warning, machine.name,
+                       " TLS certificate verification disabled for HTTPS mount."
+                       " Only use this for servers with self-signed certificates"
+                       " whose CA is not in the BMC trust store.");
+            }
+
             std::vector<std::string> params = {
                 // Use curl plugin ...
-                "curl", "sslverify=false",
+                "curl",
+                // Honor the per-mount VerifyCertificate flag.  When true,
+                // both peer and host verification are on (curl's secure
+                // default).  When false, verification is disabled — only
+                // acceptable for self-signed / air-gapped servers whose CA
+                // cannot be installed in the BMC trust store.
+                std::string("sslverify=") + (verify ? "true" : "false"),
                 // ... to mount http resource at url
                 "url=" + url};
+
+            if (verify)
+            {
+                // Use CA certs installed via the Redfish Truststore API
+                // (POST /redfish/v1/Managers/{}/Truststore/Certificates/).
+                // phosphor-certificate-manager stores them as OpenSSL
+                // hash-named files in this directory; capath= uses
+                // CURLOPT_CAPATH which expects exactly that layout.
+                params.insert(params.end() - 1,
+                              "capath=/etc/ssl/certs/authority");
+            }
 
             // Authenticate if needed
             if (machine.target->credentials)
@@ -1220,7 +1281,7 @@ struct MountPointStateMachine
                            const Configuration::MountPoint& config,
                            std::shared_ptr<sdbusplus::asio::connection>& bus) :
         ioc{ioc},
-        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}, authFailure{false}, bus(bus)
+        name{name}, config{config}, state{InitialState(*this)}, exitCode{-1}, authFailure{false}, certFailure{false}, bus(bus)
     {
         devMonitor.addDevice(config.nbdDevice);
     }
@@ -1304,6 +1365,12 @@ struct MountPointStateMachine
     State state;
     int exitCode;
     bool authFailure;
+    bool certFailure;
+    // Defaults to false for backward compatibility: existing deployments that
+    // rely on HTTPS without a CA in the BMC trust store will continue to work
+    // unchanged.  Callers opt into verification by setting the D-Bus
+    // VerifyCertificate property to true before mounting.
+    bool verifyCertificate{false};
     const std::string proxyObjectPath = "/xyz/openbmc_project/VirtualMedia/Proxy/";
     const std::string legacyObjectPath = "/xyz/openbmc_project/VirtualMedia/Legacy/";
     std::shared_ptr<sdbusplus::asio::connection>& bus;
