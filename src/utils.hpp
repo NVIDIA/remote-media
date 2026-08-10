@@ -2,13 +2,19 @@
 
 #include <boost/process/v1/async_pipe.hpp>
 #include <boost/type_traits/has_dereference.hpp>
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -18,6 +24,74 @@ namespace fs = std::filesystem;
 namespace utils
 {
 constexpr const size_t secretLimit = 1024;
+
+// An ISO9660 image carries a Volume Descriptor Set starting at sector 16
+// (offset 0x8000). Every descriptor in it begins with a type byte, the
+// "CD001" standard identifier and a version byte. Reading that is the only
+// way to tell a CD-ROM image from a disk image here, because neither NBD
+// nor nbdkit convey a media type and no image path is available when the
+// gadget is configured.
+//
+// Any descriptor type the standard defines for the set is accepted rather
+// than requiring the primary descriptor: ECMA-119 does not fix their order,
+// so a boot record may legally occupy sector 16. Being strict there would
+// misreport a bootable ISO as a disk, which is the failure being fixed.
+// Returns an empty optional when the image could not be read at all, so a
+// caller can fall back to a weaker signal instead of assuming "not a CD-ROM".
+inline std::optional<bool> isIso9660(const fs::path& device)
+{
+    int fd = ::open(device.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        return std::nullopt;
+    }
+
+    // { type, "CD001", version }
+    std::array<unsigned char, 7> descriptor{};
+    ssize_t bytesRead = ::pread(fd, descriptor.data(), descriptor.size(), 0x8000);
+    ::close(fd);
+
+    if (bytesRead < 0)
+    {
+        // The seek offset was rejected or the read itself failed (EIO, device
+        // not yet ready, ...). Unlike a short read, this is not proof the
+        // device is too small; report unreadable rather than "not a CD-ROM".
+        return std::nullopt;
+    }
+
+    if (static_cast<size_t>(bytesRead) != descriptor.size())
+    {
+        // A clean short read: the device is genuinely smaller than a volume
+        // descriptor set, so the answer is known even though nothing usable
+        // was read.
+        return false;
+    }
+
+    return descriptor[0] <= 0x03 &&
+           std::memcmp(descriptor.data() + 1, "CD001", 5) == 0 &&
+           descriptor[6] == 0x01;
+}
+
+// Fallback for when the image itself cannot be read, used with the URL a
+// legacy mount was given. An extension only claims what the content is, so
+// this is deliberately secondary to isIso9660().
+inline bool hasIsoExtension(std::string_view url)
+{
+    // An image URL may carry a query or fragment; neither is part of the path.
+    url = url.substr(0, url.find_first_of("?#"));
+
+    constexpr std::string_view extension = ".iso";
+    if (url.size() < extension.size())
+    {
+        return false;
+    }
+    url.remove_prefix(url.size() - extension.size());
+
+    return std::equal(url.begin(), url.end(), extension.begin(),
+                      [](unsigned char lhs, unsigned char rhs) {
+                          return std::tolower(lhs) == rhs;
+                      });
+}
 
 template <typename T>
 static void secureCleanup(T& value)

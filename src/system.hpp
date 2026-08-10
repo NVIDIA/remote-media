@@ -513,13 +513,15 @@ struct UsbGadget : private FsHelper
 {
   public:
     static int32_t configure(const std::string& name, const NBDDevice& nbd,
-                             StateChange change, const bool rw = false)
+                             StateChange change, const bool rw = false,
+                             const bool isCdrom = false)
     {
-        return configure(name, nbd.to_path(), change, rw);
+        return configure(name, nbd.to_path(), change, rw, isCdrom);
     }
 
     static int32_t configure(const std::string& name, const fs::path& path,
-                             StateChange change, const bool rw = false)
+                             StateChange change, const bool rw = false,
+                             const bool isCdrom = false)
     {
         LogMsg(Logger::Info, "[App]: Configure USB Gadget (name=", name,
                ", path=", path, ", State=", static_cast<uint32_t>(change), ")");
@@ -560,7 +562,8 @@ struct UsbGadget : private FsHelper
                                              massStorageDir);
                 echoToFile(funcMassStorageDir / "lun.0/removable", "1");
                 echoToFile(funcMassStorageDir / "lun.0/ro", rw ? "0" : "1");
-                echoToFile(funcMassStorageDir / "lun.0/cdrom", "0");
+                echoToFile(funcMassStorageDir / "lun.0/cdrom",
+                           isCdrom ? "1" : "0");
                 echoToFile(funcMassStorageDir / "lun.0/file", path);
 
                 for (const auto& port : fs::directory_iterator(

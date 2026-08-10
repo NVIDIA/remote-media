@@ -18,6 +18,7 @@
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <variant>
 
 using namespace phosphor::logging;
@@ -1100,10 +1101,15 @@ struct MountPointStateMachine
         {
             if (devState == StateChange::inserted)
             {
+                const auto [isCdrom, source] =
+                    MountPointStateMachine::mediaType(state.machine);
+                LogMsg(Logger::Info, state.machine.name, " Media type: ",
+                       isCdrom ? "CD-ROM" : "disk", " (", source, ")");
                 int32_t ret = UsbGadget::configure(
                     state.machine.name, state.machine.config.nbdDevice,
                     devState,
-                    state.machine.target ? state.machine.target->rw : false);
+                    state.machine.target ? state.machine.target->rw : false,
+                    isCdrom);
                 if (ret == 0)
                 {
                     // send an event
@@ -1182,6 +1188,27 @@ struct MountPointStateMachine
     };
 
     // Helper functions
+
+    // Resolves the media type the USB gadget should advertise, and where the
+    // answer came from. The image contents are authoritative; the mount URL
+    // is only a fallback for when the image cannot be read at all, since an
+    // extension claims what an image is rather than being what it is.
+    static std::pair<bool, const char*>
+        mediaType(const MountPointStateMachine& machine)
+    {
+        if (const auto detected =
+                utils::isIso9660(machine.config.nbdDevice.to_path()))
+        {
+            return {*detected, "detected"};
+        }
+        if (machine.target)
+        {
+            return {utils::hasIsoExtension(machine.target->imgUrl),
+                    "from URL"};
+        }
+        return {false, "image unreadable"};
+    }
+
     bool removeUsbGadget(const BasicState& state)
     {
         int32_t ret = UsbGadget::configure(state.machine.name,
