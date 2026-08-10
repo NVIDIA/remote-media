@@ -40,7 +40,8 @@ class Configuration
         static std::vector<std::string> toArgs(const MountPoint& mp)
         {
             std::vector<std::string> args = {
-                "-t", "30", "-u", mp.unixSocket, mp.nbdDevice.to_path(), "-n", "-L"};
+                "-N", "", "-t", "30", "-u", mp.unixSocket,
+                mp.nbdDevice.to_path(), "-n", "-L"};
             return args;
         }
     };
