@@ -26,6 +26,18 @@ class SmbShare
         auto options = params + "," + perm;
         LogMsg(Logger::Debug, "Mounting with options: ", options);
 
+        // Reject chars that could truncate/inject into the CIFS options string.
+        auto hasInjectionChar = [](const std::string& s) -> bool {
+            for (unsigned char c : s)
+            {
+                if (c == '\0' || c == ',' || c == '\n' || c == '\r')
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         std::string credentialsOpt;
         if (!credentials)
         {
@@ -34,6 +46,14 @@ class SmbShare
         }
         else
         {
+            if (hasInjectionChar(credentials->user()) ||
+                hasInjectionChar(credentials->password()))
+            {
+                LogMsg(Logger::Error,
+                       "[App]: Credentials contain characters that would "
+                       "corrupt mount options; rejecting mount");
+                return false;
+            }
             LogMsg(Logger::Info, "Authenticating as ", credentials->user());
             credentialsOpt = "username=" + credentials->user() +
                              ",password=" + credentials->password();
