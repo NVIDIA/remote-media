@@ -15,8 +15,6 @@
 
 namespace fs = std::filesystem;
 
-std::string USER = "";
-
 namespace utils
 {
 constexpr const size_t secretLimit = 1024;
@@ -95,8 +93,7 @@ class CredentialsProvider
 
     const std::string& user()
     {
-      USER = credentials.user();
-      return credentials.user();
+        return credentials.user();
     }
 
     const std::string& password()
