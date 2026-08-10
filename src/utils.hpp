@@ -2,11 +2,16 @@
 
 #include <boost/process/v1/async_pipe.hpp>
 #include <boost/type_traits/has_dereference.hpp>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -174,12 +179,10 @@ class VolatileFile
     using Buffer = CredentialsProvider::SecureBuffer;
 
   public:
+    // size is initialised before filePath so the buffer can be moved below.
     VolatileFile(Buffer&& contents) :
-        filePath(fs::temp_directory_path() / std::tmpnam(nullptr)),
-        size(contents->size())
+        size(contents->size()), filePath(createSecure(std::move(contents)))
     {
-        auto data = std::move(contents);
-        create(filePath, data);
     }
 
     ~VolatileFile()
@@ -207,21 +210,67 @@ class VolatileFile
     }
 
   private:
-    static void create(const std::string& filePath, const Buffer& data)
+    // mkstemp atomically creates the 0600 file, avoiding the tmpnam TOCTOU race.
+    static std::string createSecure(Buffer data)
     {
-        // Create file
-        std::ofstream file(filePath);
+        std::string tmpl =
+            (fs::temp_directory_path() / "vm-cred-XXXXXX").string();
+        int fd = ::mkstemp(tmpl.data());
+        if (fd < 0)
+        {
+            throw std::system_error(errno, std::generic_category(),
+                                    "mkstemp failed");
+        }
+        if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0)
+        {
+            int saved = errno;
+            ::close(fd);
+            ::unlink(tmpl.c_str());
+            throw std::system_error(saved, std::generic_category(),
+                                    "fchmod of temp credential file failed");
+        }
 
-        // Limit permissions to owner only
-        fs::permissions(filePath,
-                        fs::perms::owner_read | fs::perms::owner_write,
-                        fs::perm_options::replace);
-
-        // Write contents
-        file.write(data->data(), data->size());
+        const char* ptr = data->data();
+        std::size_t remaining = data->size();
+        while (remaining > 0)
+        {
+            ssize_t n = ::write(fd, ptr, remaining);
+            if (n < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                int saved = errno;
+                ::close(fd);
+                ::unlink(tmpl.c_str());
+                throw std::system_error(saved, std::generic_category(),
+                                        "write to temp credential file failed");
+            }
+            if (n == 0)
+            {
+                ::close(fd);
+                ::unlink(tmpl.c_str());
+                throw std::system_error(EIO, std::generic_category(),
+                                        "short write to temp credential file");
+            }
+            ptr += static_cast<std::size_t>(n);
+            remaining -= static_cast<std::size_t>(n);
+        }
+        // close() can surface a deferred write-back error (e.g. EIO) even
+        // after every write() succeeded; fail construction rather than hand
+        // back a path to a file that may not have persisted.
+        if (::close(fd) != 0)
+        {
+            int saved = errno;
+            ::unlink(tmpl.c_str());
+            throw std::system_error(saved, std::generic_category(),
+                                    "close of temp credential file failed");
+        }
+        return tmpl;
     }
 
-    const std::string filePath;
     const std::size_t size;
+    const std::string filePath;
 };
 } // namespace utils
