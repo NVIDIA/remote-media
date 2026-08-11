@@ -895,10 +895,20 @@ struct MountPointStateMachine
                 }
             }
 
+            // Shell-quote each arg: an empty string (e.g. the -N export name)
+            // must become "''" so the shell does not collapse the double space
+            // produced by join() and accidentally feed the next token to -N.
+            auto toShellArg = [](const std::string& s) -> std::string {
+                return s.empty() ? "''" : s;
+            };
+            auto rawArgs = Configuration::MountPoint::toArgs(machine.config);
+            std::vector<std::string> shellArgs;
+            shellArgs.reserve(rawArgs.size());
+            for (const auto& a : rawArgs)
+                shellArgs.push_back(toShellArg(a));
             std::string nbd_client =
                 "/usr/sbin/nbd-client " +
-                boost::algorithm::join(
-                    Configuration::MountPoint::toArgs(machine.config), " ");
+                boost::algorithm::join(shellArgs, " ");
 
             std::vector<std::string> args = {
                 // Listen for client on this unix socket...
