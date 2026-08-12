@@ -597,15 +597,16 @@ struct UsbGadget : private FsHelper
                 success = false;
             }
         }
-        // StateChange: unknown, notMonitored, inserted were handler
-        // earlier. We'll get here only for removed, or cleanup
+        // Remove via fs::remove() instead of system() to avoid shell injection.
+        const std::array<fs::path, 6> dirsToRemove = {
+            massStorageDir, funcMassStorageDir, configStringsDir,
+            configDir,      stringsDir,         gadgetDir,
+        };
 
-        const std::string gadgetPath =
-            "/sys/kernel/config/usb_gadget/mass-storage-" + name;
-
+        // Unbind the gadget from the UDC before tearing down the directories.
         try
         {
-            echoToFile(fs::path(gadgetPath) / "UDC", "");
+            echoToFile(gadgetDir / "UDC", "");
         }
         catch (std::ofstream::failure& e)
         {
@@ -613,32 +614,15 @@ struct UsbGadget : private FsHelper
                    "[App]: UsbGadget UDC unbind: ", e.what());
         }
 
-        const std::string removeMassStorageDir =
-            "rm " + gadgetPath + "/configs/c.1/mass_storage.usb0";
-        const std::string removeFuncMassStorageDir =
-            "rmdir " + gadgetPath + "/functions/mass_storage.usb0";
-        const std::string removeConfigStringsDir =
-            "rmdir  " + gadgetPath + "/configs/c.1/strings/0x409";
-        const std::string removeConfigDir =
-            "rmdir  " + gadgetPath + "/configs/c.1";
-        const std::string removeStringsDir =
-            "rmdir  " + gadgetPath + "/strings/0x409";
-        const std::string removeGadgetDir = "rmdir  " + gadgetPath;
-
-        const std::array<const char*, 6> dirs = {
-            removeMassStorageDir.c_str(),   removeFuncMassStorageDir.c_str(),
-            removeConfigStringsDir.c_str(), removeConfigDir.c_str(),
-            removeStringsDir.c_str(),       removeGadgetDir.c_str()};
-
-        for (const char* dir : dirs)
+        for (const auto& p : dirsToRemove)
         {
-            int ret = 0;
-            ret = system(dir);
-            if (ret != 0)
+            std::error_code removeEc;
+            fs::remove(p, removeEc);
+            if (removeEc)
             {
                 success = false;
-                LogMsg(Logger::Error,
-                       "[App]: UsbGadget : Can't remove file or directory");
+                LogMsg(Logger::Error, "[App]: UsbGadget : Can't remove ", p,
+                       ": ", removeEc.message());
             }
         }
 
