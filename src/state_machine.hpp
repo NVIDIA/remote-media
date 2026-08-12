@@ -326,15 +326,14 @@ struct MountPointStateMachine
                     property = req;
                     return -1;
                 },
+                // Read username from the per-mount credentials, not a global.
                 [&machine = state.machine](const std::string& property) {
-                    if (std::get_if<ActiveState>(&machine.state))
+                    if (std::get_if<ActiveState>(&machine.state) &&
+                        machine.target && machine.target->credentials)
                     {
-                        return USER;
+                        return machine.target->credentials->user();
                     }
-                    else
-                    {
-                        return std::string("");
-                    }
+                    return std::string("");
                 });
             iface->register_property(
                 "WriteProtected", bool(true),
