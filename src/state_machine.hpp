@@ -1233,9 +1233,21 @@ struct MountPointStateMachine
                 return ReadyState(state, std::errc::device_or_resource_busy,
                                   "Unable to configure gadget");
             }
-            return ReadyState(state, std::errc::operation_not_supported,
-                              "Unexpected udev event: " +
-                                  static_cast<int>(devState));
+            // Keep waiting rather than failing the mount. A "removed" is
+            // expected here: registration pokes a synthetic "change" uevent via
+            // forceUdevChange(), and DeviceMonitor reads the device size when it
+            // drains that event, not when it was queued. Drained before
+            // nbd-client attaches, the size still reads 0 and the event arrives
+            // as "removed" on a slot that is mid-activation. Failing on it also
+            // left the backing process running, orphaning an nbd-client that
+            // claimed the device and collided with the retry.
+            //
+            // A process that really died still unwinds us to Ready via
+            // SubprocessStoppedEvent, so this cannot wait forever.
+            LogMsg(Logger::Info, state.machine.name,
+                   " Ignoring unexpected udev event while waiting for gadget: ",
+                   static_cast<int>(devState));
+            return state;
         }
 
         State operator()(const ReadyState& state)
