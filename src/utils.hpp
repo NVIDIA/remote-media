@@ -17,7 +17,11 @@ constexpr const size_t secretLimit = 1024;
 template <typename T>
 static void secureCleanup(T& value)
 {
-    auto raw = const_cast<typename T::value_type*>(&value[0]);
+    if (value.empty())
+    {
+        return;
+    }
+    auto raw = const_cast<typename T::value_type*>(value.data());
     explicit_bzero(raw, value.size() * sizeof(*raw));
 }
 
