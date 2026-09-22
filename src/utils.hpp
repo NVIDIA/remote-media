@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -39,21 +40,30 @@ constexpr const size_t secretLimit = 1024;
 // caller can fall back to a weaker signal instead of assuming "not a CD-ROM".
 inline std::optional<bool> isIso9660(const fs::path& device)
 {
-    std::ifstream image(device, std::ios::binary);
-    if (!image)
+    int fd = ::open(device.c_str(), O_RDONLY);
+    if (fd < 0)
     {
         return std::nullopt;
     }
 
     // { type, "CD001", version }
     std::array<unsigned char, 7> descriptor{};
-    image.seekg(0x8000);
-    image.read(reinterpret_cast<char*>(descriptor.data()), descriptor.size());
+    ssize_t bytesRead = ::pread(fd, descriptor.data(), descriptor.size(), 0x8000);
+    ::close(fd);
 
-    if (image.gcount() != static_cast<std::streamsize>(descriptor.size()))
+    if (bytesRead < 0)
     {
-        // Anything this small cannot hold a volume descriptor set, so the
-        // answer is known even though nothing was read.
+        // The seek offset was rejected or the read itself failed (EIO, device
+        // not yet ready, ...). Unlike a short read, this is not proof the
+        // device is too small; report unreadable rather than "not a CD-ROM".
+        return std::nullopt;
+    }
+
+    if (static_cast<size_t>(bytesRead) != descriptor.size())
+    {
+        // A clean short read: the device is genuinely smaller than a volume
+        // descriptor set, so the answer is known even though nothing usable
+        // was read.
         return false;
     }
 
