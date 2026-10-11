@@ -13,6 +13,8 @@
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -54,6 +56,7 @@ struct deviceDeleter
 
 #define NBD_DISCONNECT _IO(0xab, 8)
 #define NBD_CLEAR_SOCK _IO(0xab, 4)
+#define NBD_SET_SIZE _IO(0xab, 2)
 
 class NBDDevice
 {
@@ -135,12 +138,17 @@ class NBDDevice
             return;
         }
 
-        int fd = open(to_path().c_str(), O_RDWR);
+        int fd = open(to_path().c_str(), O_RDONLY);
 
         if (fd < 0)
         {
             LogMsg(Logger::Error, "Couldn't open device ", to_path().c_str());
             return;
+        }
+        if (ioctl(fd, NBD_SET_SIZE, 0) < 0)
+        {
+            LogMsg(Logger::Error, "NBD_SET_SIZE 0 failed on ",
+                   to_path().c_str(), ": ", strerror(errno));
         }
         if (ioctl(fd, NBD_DISCONNECT) < 0)
         {
