@@ -12,6 +12,7 @@
 #include <phosphor-logging/redfish_event_log.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 
+#include <cerrno>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -91,6 +92,12 @@ struct MountPointStateMachine
             BasicState(state, __FUNCTION__),
             error{{ec, message}}
         {
+            // Keep a bounded copy for the LastError D-Bus property. bmcweb
+            // reads it after Mount returns so the Redfish error can carry
+            // this text instead of a blank InternalError.
+            machine.lastError = message.size() <= 512
+                                    ? message
+                                    : message.substr(0, 512);
             LogMsg(Logger::Error, state.machine.name,
                    " Errno = ", static_cast<int>(ec), " : ", message);
         };
@@ -124,6 +131,9 @@ struct MountPointStateMachine
             machine.exitCode = -1;
             machine.authFailure = false;
             machine.certFailure = false;
+            machine.nbdLinkLossLine.clear();
+            machine.childErrorLine.clear();
+            machine.lastError.clear();
 
             machine.emitActivationStartedEvent();
         }
@@ -144,6 +154,11 @@ struct MountPointStateMachine
         {}
         ActiveState(const WaitingForGadgetState& state) :
             BasicState(state, __FUNCTION__), process{state.process} {};
+
+        virtual void onEnter()
+        {
+            machine.lastError.clear();
+        }
 
         std::weak_ptr<Process> process;
     };
@@ -338,6 +353,15 @@ struct MountPointStateMachine
                     return std::string("");
                 });
             iface->register_property(
+                "LastError", std::string(""),
+                [](const std::string& req, std::string& property) {
+                    property = req;
+                    return -1;
+                },
+                [&machine = state.machine](const std::string& property) {
+                    return machine.lastError;
+                });
+            iface->register_property(
                 "VerifyCertificate", bool(false),
                 [&machine = state.machine](const bool& req, bool& property) {
                     if (!std::get_if<ReadyState>(&machine.state))
@@ -430,10 +454,15 @@ struct MountPointStateMachine
                 }
                 catch (InvalidStateError& e)
                 {
+                    machine.lastError = e.what();
                     throw sdbusplus::exception::SdBusError(EPERM, e.what());
                     return false;
                 }
 
+                // 12s stays under the usual Redfish client timeout. A longer
+                // wait lets the client abort while this slot is still
+                // activating, and the retry then fails because the slot is
+                // not empty.
                 boost::asio::steady_timer timer(machine.ioc.get());
                 int waitCnt = 120;
                 while (waitCnt > 0)
@@ -444,9 +473,14 @@ struct MountPointStateMachine
                         {
                             throw sdbusplus::exception::SdBusError(
                                 static_cast<int>(s->error->code),
-                                s->error->message.c_str());
+                                machine.lastError.c_str());
                         }
-                        return false;
+                        if (machine.lastError.empty())
+                        {
+                            machine.lastError = "Virtual media mount failed";
+                        }
+                        throw sdbusplus::exception::SdBusError(
+                            EIO, machine.lastError.c_str());
                     }
                     if (std::get_if<ActiveState>(&machine.state))
                     {
@@ -457,7 +491,20 @@ struct MountPointStateMachine
                     timer.async_wait(yield[ignored_ec]);
                     waitCnt--;
                 }
-                return false;
+
+                const char* reason =
+                    "Timed out waiting for virtual media to become ready";
+                machine.lastError = reason;
+                if (!std::get_if<ReadyState>(&machine.state))
+                {
+                    try
+                    {
+                        machine.emitUnmountEvent();
+                    }
+                    catch (const InvalidStateError&)
+                    {}
+                }
+                throw sdbusplus::exception::SdBusError(ETIMEDOUT, reason);
             };
 
             // Mount specialization
@@ -495,6 +542,7 @@ struct MountPointStateMachine
                                 buf.begin(), buf.begin() + size, '\0');
                             if (nullCount != 2)
                             {
+                                machine.lastError = "Malformed extra data";
                                 throw sdbusplus::exception::SdBusError(
                                     EINVAL, "Malformed extra data");
                             }
@@ -504,22 +552,25 @@ struct MountPointStateMachine
                             // Second 'part', after NULL delimiter
                             std::string pass(buf.begin() + user.length() + 1);
 
-                            // Reject characters that would allow CIFS mount
-                            // option injection: a comma terminates the current
-                            // key=value token, an equals sign introduces a
-                            // spurious key, and newlines break credential-file
-                            // parsers (e.g. the CIFS "credentials=" option).
-                            auto hasInjectionChars =
-                                [](const std::string& s) {
-                                return s.find_first_of(",=\n\r") !=
+                            // CIFS mount options are a comma-separated
+                            // key=value list, so comma, equals, and newlines
+                            // in a credential can inject options. HTTPS
+                            // passwords and bearer tokens are not shell
+                            // options; only CR/LF can break the header line.
+                            // Bearer tokens and API keys routinely contain '='.
+                            const bool cifs = imgUrl.starts_with("smb://");
+                            auto hasBannedChars = [cifs](const std::string& s) {
+                                const char* banned = cifs ? ",=\n\r" : "\n\r";
+                                return s.find_first_of(banned) !=
                                        std::string::npos;
                             };
-                            if (hasInjectionChars(user) ||
-                                hasInjectionChars(pass))
+                            if (hasBannedChars(user) || hasBannedChars(pass))
                             {
                                 utils::secureCleanup(user);
                                 utils::secureCleanup(pass);
                                 utils::secureCleanup(buf);
+                                machine.lastError =
+                                    "Credentials contain invalid characters";
                                 throw sdbusplus::exception::SdBusError(
                                     EINVAL,
                                     "Credentials contain invalid characters");
@@ -632,7 +683,6 @@ struct MountPointStateMachine
         }
         State operator()(const WaitingForGadgetState& state)
         {
-            state.machine.stopProcess(state.process);
             // authFailure/certFailure share the invalid_argument errc (both
             // are caller-fixable, not server-side faults), but the message
             // strings differ and that message is what actually reaches the
@@ -640,27 +690,41 @@ struct MountPointStateMachine
             // above and also propagated verbatim as the D-Bus error message
             // in handleMount(), so "TLS certificate verification failed" is
             // distinguishable from "Invalid credentials" end-to-end.
-            if (state.machine.authFailure)
+            // Snapshot the kernel log before stopProcess(). That ioctl shuts
+            // the NBD socket down and would show up as the cause.
+            if (state.machine.authFailure || state.machine.certFailure)
             {
-                return ReadyState(state, std::errc::invalid_argument,
-                                  "Invalid credentials");
-            }
-            if (state.machine.certFailure)
-            {
+                if (!state.machine.childErrorLine.empty())
+                {
+                    LogMsg(Logger::Error, state.machine.name, " Child: ",
+                           state.machine.childErrorLine);
+                }
+                state.machine.stopProcess(state.process);
+                if (state.machine.authFailure)
+                {
+                    return ReadyState(state, std::errc::invalid_argument,
+                                      "Invalid credentials");
+                }
                 return ReadyState(state, std::errc::invalid_argument,
                                   "TLS certificate verification failed");
             }
-            return ReadyState(state, std::errc::io_error,
-                              "Process ended prematurely");
+            const std::string summary =
+                state.machine.lostNbdConnectionSummary(
+                    "before the mount became ready");
+            state.machine.stopProcess(state.process);
+            return ReadyState(state, std::errc::io_error, summary);
         }
         State operator()(const ActiveState& state)
         {
+            const std::string summary =
+                state.machine.lostNbdConnectionSummary(
+                    "while media was mounted");
             if (!state.machine.removeUsbGadget(state))
             {
                 return ReadyState(state, std::errc::device_or_resource_busy,
                                   "Unable to unmount gadget");
             }
-            return ReadyState(state);
+            return ReadyState(state, std::errc::io_error, summary);
         }
         State operator()(const WaitingForProcessEndState& state)
         {
@@ -693,13 +757,16 @@ struct MountPointStateMachine
             }
             if (!process->spawn(
                     Configuration::MountPoint::toArgs(state.machine.config),
-                    [&machine = state.machine](int exitCode, bool isReady,
-                                               bool authFailure,
-                                               bool certFailure) {
+                    [&machine = state.machine](
+                        int exitCode, bool isReady, bool authFailure,
+                        bool certFailure, std::string nbdLinkLossLine,
+                        std::string childErrorLine) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
                         machine.authFailure = authFailure;
                         machine.certFailure = certFailure;
+                        machine.nbdLinkLossLine = std::move(nbdLinkLossLine);
+                        machine.childErrorLine = std::move(childErrorLine);
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -957,11 +1024,14 @@ struct MountPointStateMachine
             if (!process->spawn(
                     args, [&machine = machine, secret = std::move(secret)](
                               int exitCode, bool isReady, bool authFailure,
-                              bool certFailure) {
+                              bool certFailure, std::string nbdLinkLossLine,
+                              std::string childErrorLine) {
                         LogMsg(Logger::Info, machine.name, " process ended.");
                         machine.exitCode = exitCode;
                         machine.authFailure = authFailure;
                         machine.certFailure = certFailure;
+                        machine.nbdLinkLossLine = std::move(nbdLinkLossLine);
+                        machine.childErrorLine = std::move(childErrorLine);
                         machine.emitSubprocessStoppedEvent();
                     }))
             {
@@ -1010,6 +1080,10 @@ struct MountPointStateMachine
             std::vector<std::string> params = {
                 // Use curl plugin ...
                 "curl",
+                // Artifactory download URLs often redirect. Follow them, but
+                // do not allow a redirect to leave HTTPS.
+                "followlocation=true",
+                "protocols=https",
                 // Honor the per-mount VerifyCertificate flag.  When true,
                 // both peer and host verification are on (curl's secure
                 // default).  When false, verification is disabled — only
@@ -1030,23 +1104,51 @@ struct MountPointStateMachine
                               "capath=/etc/ssl/certs/authority");
             }
 
-            // Authenticate if needed
+            // Authenticate if needed. A username means HTTP Basic. An empty
+            // username with a password is an Artifactory bearer token sent in
+            // the Redfish Password field. The token is written to a 0600 file
+            // and a header-script cats that file, so it never appears in
+            // nbdkit's argv. Requires nbdkit >= 1.26 (header-script,
+            // followlocation).
             if (machine.target->credentials)
             {
-                // Pack password into buffer
-                utils::CredentialsProvider::SecureBuffer buff =
-                    machine.target->credentials->pack(
-                        [](const std::string& user, const std::string& pass,
-                           std::vector<char>& buff) {
-                            std::copy(pass.begin(), pass.end(),
-                                      std::back_inserter(buff));
-                        });
+                const std::string& user = machine.target->credentials->user();
+                const std::string& pass =
+                    machine.target->credentials->password();
+                if (user.empty() && !pass.empty())
+                {
+                    LogMsg(Logger::Info, machine.name,
+                           " HTTPS mount using bearer token");
+                    std::string header = "Authorization: Bearer ";
+                    header += pass;
+                    header.push_back('\n');
+                    auto* raw = new utils::CredentialsProvider::Buffer(
+                        header.begin(), header.end());
+                    utils::secureCleanup(header);
+                    secret = std::make_unique<utils::VolatileFile>(
+                        utils::CredentialsProvider::SecureBuffer{raw});
+                    params.push_back("header-script=cat '" + secret->path() +
+                                     "'");
+                }
+                else if (!user.empty())
+                {
+                    // Pack password into buffer
+                    utils::CredentialsProvider::SecureBuffer buff =
+                        machine.target->credentials->pack(
+                            [](const std::string& /*user*/,
+                               const std::string& password,
+                               std::vector<char>& dest) {
+                                std::copy(password.begin(), password.end(),
+                                          std::back_inserter(dest));
+                            });
 
-                // Prepare file to provide the password with
-                secret = std::make_unique<utils::VolatileFile>(std::move(buff));
+                    // Prepare file to provide the password with
+                    secret =
+                        std::make_unique<utils::VolatileFile>(std::move(buff));
 
-                params.push_back("user=" + machine.target->credentials->user());
-                params.push_back("password=+" + secret->path());
+                    params.push_back("user=" + user);
+                    params.push_back("password=+" + secret->path());
+                }
             }
 
             return spawnNbdKit(machine, std::move(secret), params);
@@ -1283,6 +1385,82 @@ struct MountPointStateMachine
         }
         return true;
     }
+    // Logs the kernel NBD fault and the child error at Error, then returns
+    // the one-line reason. A requested unmount waits in
+    // WaitingForProcessEndState and does not come through here.
+    std::string lostNbdConnectionSummary(const char* when)
+    {
+        const int timeoutSec = config.effectiveTimeoutSec();
+        const std::string nbdName = config.nbdDevice.to_string();
+        const std::string nbdPath = config.nbdDevice.to_path().string();
+        const KernelNbdFaultReport faults = readRecentKernelNbdFaults(nbdName);
+
+        bool kernelTimeout = false;
+        bool kernelClosed = false;
+        if (!faults.opened)
+        {
+            LogMsg(Logger::Error, name, " Could not read the kernel log (",
+                   std::strerror(faults.openErrno),
+                   "); NBD socket-shutdown text was not copied.");
+        }
+        else if (faults.lines.empty())
+        {
+            LogMsg(Logger::Error, name,
+                   " Kernel log has no NBD socket-shutdown line for ", nbdName,
+                   ".");
+        }
+        else
+        {
+            for (const auto& line : faults.lines)
+            {
+                if (line.find("Connection timed out") != std::string::npos)
+                {
+                    kernelTimeout = true;
+                }
+                if (line.find("Dead connection") != std::string::npos ||
+                    line.find("shutting down sockets") != std::string::npos ||
+                    line.find("Receive control failed") != std::string::npos)
+                {
+                    kernelClosed = true;
+                }
+                LogMsg(Logger::Error, name, " Kernel: ", line);
+            }
+        }
+
+        if (!childErrorLine.empty())
+        {
+            LogMsg(Logger::Error, name, " Child: ", childErrorLine);
+        }
+        if (!nbdLinkLossLine.empty() && nbdLinkLossLine != childErrorLine)
+        {
+            LogMsg(Logger::Error, name, " Child: ", nbdLinkLossLine);
+        }
+
+        std::string summary = std::string("NBD connection lost ") + when +
+                              " on " + nbdPath + " (nbd-client -t " +
+                              std::to_string(timeoutSec) + "s, exit " +
+                              std::to_string(exitCode) + ")";
+        if (kernelTimeout)
+        {
+            summary += ": kernel timed out an in-flight NBD request";
+        }
+        else if (kernelClosed)
+        {
+            summary += ": kernel closed the NBD socket";
+        }
+        else if (!nbdLinkLossLine.empty())
+        {
+            summary += ": ";
+            summary += nbdLinkLossLine;
+        }
+        else if (!childErrorLine.empty())
+        {
+            summary += ": ";
+            summary += childErrorLine;
+        }
+        return summary;
+    }
+
     void stopProcess(std::weak_ptr<Process> process)
     {
         if (auto ptr = process.lock())
@@ -1383,6 +1561,11 @@ struct MountPointStateMachine
     int exitCode;
     bool authFailure;
     bool certFailure;
+    std::string nbdLinkLossLine;
+    std::string childErrorLine;
+    // Reason from the last failed mount. Cleared when a mount starts and
+    // when it becomes active. Exposed as the MountPoint LastError property.
+    std::string lastError;
     // Defaults to false for backward compatibility: existing deployments that
     // rely on HTTPS without a CA in the BMC trust store will continue to work
     // unchanged.  Callers opt into verification by setting the D-Bus

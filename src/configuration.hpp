@@ -37,10 +37,25 @@ class Configuration
         Mode mode;
         std::vector<std::string> allowedLocalMountPoints;
 
+        // nbd-client -t, in seconds. The kernel closes the socket when one
+        // request stays in flight longer than this. JSON "Timeout" overrides
+        // it. 30s drops Artifactory-backed installs on a single stalled read.
+        static constexpr int defaultNbdClientTimeoutSec = 300;
+
+        int effectiveTimeoutSec() const
+        {
+            if (timeout.has_value() && *timeout > 0)
+            {
+                return *timeout;
+            }
+            return defaultNbdClientTimeoutSec;
+        }
+
         static std::vector<std::string> toArgs(const MountPoint& mp)
         {
             std::vector<std::string> args = {
-                "-t", "30", "-u", mp.unixSocket, mp.nbdDevice.to_path(), "-n", "-L"};
+                "-t", std::to_string(mp.effectiveTimeoutSec()), "-u",
+                mp.unixSocket, mp.nbdDevice.to_path(), "-n", "-L"};
             return args;
         }
     };
