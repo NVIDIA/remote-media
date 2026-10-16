@@ -470,23 +470,30 @@ class Process : public std::enable_shared_from_this<Process>
             }
         }
         LogMsg(Logger::Info, "[Process]: Exiting from COUT Loop");
-        // The process shall be dead, or almost here, give it a chance
+        // Yield until the child is reaped. child.running() collects the
+        // exit status with waitpid(WNOHANG). child.wait() would block the
+        // single io_context thread after terminate().
         LogMsg(Logger::Debug, "[Process]: Waiting process to finish normally");
         boost::asio::steady_timer timer(ioc);
         int32_t waitCnt = 20;
-        while (child.running() && waitCnt > 0)
+        bool sentTerminate = false;
+        while (child.running())
         {
+            if (waitCnt == 0 && !sentTerminate)
+            {
+                LogMsg(Logger::Info, "[Process] Terminate if process doesnt "
+                                     "want to exit nicely");
+                child.terminate();
+                sentTerminate = true;
+            }
             boost::system::error_code ignored_ec;
             timer.expires_after(std::chrono::milliseconds(100));
             timer.async_wait(yield[ignored_ec]);
-            waitCnt--;
+            if (waitCnt > 0)
+            {
+                waitCnt--;
+            }
         }
-        if (child.running())
-        {
-            child.terminate();
-        }
-
-        child.wait();
         LogMsg(Logger::Info, "[Process]: running: ", child.running(),
                " EC: ", child.exit_code(),
                " Native: ", child.native_exit_code());
