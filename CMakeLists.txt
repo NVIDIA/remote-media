@@ -56,6 +56,12 @@ set(SRC_FILES src/main.cpp)
 # Executables
 add_executable(virtual-media ${SRC_FILES} ${HEADER_FILES})
 
+enable_testing()
+add_executable(virtual-media-nbd-faults-test test/nbd_faults_test.cpp)
+target_include_directories(virtual-media-nbd-faults-test PRIVATE
+                           ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME nbd-faults COMMAND virtual-media-nbd-faults-test)
+
 # Default linkage
 target_link_libraries(virtual-media systemd)
 target_link_libraries(virtual-media -lsdbusplus)

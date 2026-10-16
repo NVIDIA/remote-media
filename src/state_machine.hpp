@@ -19,12 +19,18 @@
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 
 using namespace phosphor::logging;
-struct MountPointStateMachine
+struct MountPointStateMachine :
+    std::enable_shared_from_this<MountPointStateMachine>
 {
+    // Bound for the LastError D-Bus property. bmcweb copies this text into
+    // the Redfish error body.
+    static constexpr std::size_t lastErrorMaxBytes = 512;
+
     struct InvalidStateError : std::runtime_error
     {
         InvalidStateError(const char* what) : std::runtime_error(what)
@@ -95,9 +101,9 @@ struct MountPointStateMachine
             // Keep a bounded copy for the LastError D-Bus property. bmcweb
             // reads it after Mount returns so the Redfish error can carry
             // this text instead of a blank InternalError.
-            machine.lastError = message.size() <= 512
+            machine.lastError = message.size() <= lastErrorMaxBytes
                                     ? message
-                                    : message.substr(0, 512);
+                                    : message.substr(0, lastErrorMaxBytes);
             LogMsg(Logger::Error, state.machine.name,
                    " Errno = ", static_cast<int>(ec), " : ", message);
         };
@@ -761,13 +767,10 @@ struct MountPointStateMachine
                         int exitCode, bool isReady, bool authFailure,
                         bool certFailure, std::string nbdLinkLossLine,
                         std::string childErrorLine) {
-                        LogMsg(Logger::Info, machine.name, " process ended.");
-                        machine.exitCode = exitCode;
-                        machine.authFailure = authFailure;
-                        machine.certFailure = certFailure;
-                        machine.nbdLinkLossLine = std::move(nbdLinkLossLine);
-                        machine.childErrorLine = std::move(childErrorLine);
-                        machine.emitSubprocessStoppedEvent();
+                        machine.completeChildProcess(
+                            exitCode, isReady, authFailure, certFailure,
+                            std::move(nbdLinkLossLine),
+                            std::move(childErrorLine));
                     }))
             {
                 return ReadyState(state, std::errc::operation_canceled,
@@ -1026,13 +1029,10 @@ struct MountPointStateMachine
                               int exitCode, bool isReady, bool authFailure,
                               bool certFailure, std::string nbdLinkLossLine,
                               std::string childErrorLine) {
-                        LogMsg(Logger::Info, machine.name, " process ended.");
-                        machine.exitCode = exitCode;
-                        machine.authFailure = authFailure;
-                        machine.certFailure = certFailure;
-                        machine.nbdLinkLossLine = std::move(nbdLinkLossLine);
-                        machine.childErrorLine = std::move(childErrorLine);
-                        machine.emitSubprocessStoppedEvent();
+                        machine.completeChildProcess(
+                            exitCode, isReady, authFailure, certFailure,
+                            std::move(nbdLinkLossLine),
+                            std::move(childErrorLine));
                     }))
             {
                 LogMsg(Logger::Error, machine.name,
@@ -1391,9 +1391,10 @@ struct MountPointStateMachine
     std::string lostNbdConnectionSummary(const char* when)
     {
         const int timeoutSec = config.effectiveTimeoutSec();
-        const std::string nbdName = config.nbdDevice.to_string();
         const std::string nbdPath = config.nbdDevice.to_path().string();
-        const KernelNbdFaultReport faults = readRecentKernelNbdFaults(nbdName);
+        const std::string nbdName = config.nbdDevice.to_string();
+        const KernelNbdFaultReport faults = std::move(kernelFaults);
+        kernelFaults = {};
 
         bool kernelTimeout = false;
         bool kernelClosed = false;
@@ -1532,6 +1533,46 @@ struct MountPointStateMachine
         emitEvent(SubprocessStoppedEvent());
     }
 
+    // Record child-process exit. An unexpected drop reads the kernel ring on
+    // a worker thread, then posts the state change back here. klogctl copies
+    // a bounded tail of the ring; doing that on this single-threaded
+    // io_context would stall every other slot until the copy finished.
+    // Auth, certificate, and requested-unmount exits do not need that scan
+    // and complete inline. LastError is filled only after the worker posts,
+    // so the Mount waiter still sees the kernel reason.
+    void completeChildProcess(int code, bool /*isReady*/, bool authFailed,
+                              bool certFailed, std::string linkLoss,
+                              std::string childError)
+    {
+        LogMsg(Logger::Info, name, " process ended.");
+        exitCode = code;
+        authFailure = authFailed;
+        certFailure = certFailed;
+        nbdLinkLossLine = std::move(linkLoss);
+        childErrorLine = std::move(childError);
+
+        const bool needKernelFaults =
+            !authFailure && !certFailure &&
+            (std::get_if<WaitingForGadgetState>(&state) != nullptr ||
+             std::get_if<ActiveState>(&state) != nullptr);
+        if (!needKernelFaults)
+        {
+            emitSubprocessStoppedEvent();
+            return;
+        }
+
+        const std::string nbdName = config.nbdDevice.to_string();
+        auto self = shared_from_this();
+        std::thread([self, nbdName]() {
+            KernelNbdFaultReport faults = readRecentKernelNbdFaults(nbdName);
+            boost::asio::post(
+                self->ioc.get(), [self, faults = std::move(faults)]() mutable {
+                    self->kernelFaults = std::move(faults);
+                    self->emitSubprocessStoppedEvent();
+                });
+        }).detach();
+    }
+
     void emitUdevStateChangeEvent(const NBDDevice& dev, StateChange devState)
     {
         if (config.nbdDevice == dev)
@@ -1563,6 +1604,9 @@ struct MountPointStateMachine
     bool certFailure;
     std::string nbdLinkLossLine;
     std::string childErrorLine;
+    // Filled by the worker started in completeChildProcess before the
+    // unexpected-drop transition. Empty for exits that skip that read.
+    KernelNbdFaultReport kernelFaults;
     // Reason from the last failed mount. Cleared when a mount starts and
     // when it becomes active. Exposed as the MountPoint LastError property.
     std::string lastError;

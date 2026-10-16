@@ -1,6 +1,7 @@
 #pragma once
 
 #include "logger.hpp"
+#include "nbd_faults.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
@@ -13,6 +14,7 @@
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <sys/klog.h>
+#include <sys/types.h>
 
 // glibc only exposes these when _DEFAULT_SOURCE is set. The unit-test
 // image compiles without it. The values are the syslog(2) command numbers.
@@ -24,7 +26,6 @@
 #endif
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -369,111 +370,39 @@ class DeviceMonitor
     boost::container::flat_map<NBDDevice, StateChange> devices;
 };
 
-struct KernelNbdFaultReport
-{
-    bool opened = false;
-    int openErrno = 0;
-    std::vector<std::string> lines;
-};
-
-inline bool messageNamesNbdDevice(const std::string& msg,
-                                  const std::string& nbdName)
-{
-    if (nbdName.empty())
-    {
-        return false;
-    }
-    std::size_t pos = 0;
-    while ((pos = msg.find(nbdName, pos)) != std::string::npos)
-    {
-        const bool boundaryBefore =
-            pos == 0 ||
-            !std::isdigit(static_cast<unsigned char>(msg[pos - 1]));
-        const std::size_t after = pos + nbdName.size();
-        const bool boundaryAfter =
-            after >= msg.size() ||
-            !std::isdigit(static_cast<unsigned char>(msg[after]));
-        if (boundaryBefore && boundaryAfter)
-        {
-            return true;
-        }
-        pos = after;
-    }
-    return false;
-}
-
-inline bool isKernelNbdSocketFault(const std::string& msg)
-{
-    return msg.find("Connection timed out") != std::string::npos ||
-           msg.find("Dead connection") != std::string::npos ||
-           msg.find("shutting down sockets") != std::string::npos ||
-           msg.find("Receive control failed") != std::string::npos;
-}
-
 // Copy the NBD driver's own fault lines out of the kernel ring. Those are
 // dev_err prints ("Connection timed out", "Dead connection", ...), so they
-// are already in the journal, but not in this process's log. Keep the last
-// few for this device so an unexpected drop records why the socket died.
+// are already in the journal, but not in this process's log. Only the tail
+// is copied: klogctl(READ_ALL) returns the last `len` bytes, and a full
+// ring can be large. Callers run this off the io_context thread.
 inline KernelNbdFaultReport
     readRecentKernelNbdFaults(const std::string& nbdName)
 {
     KernelNbdFaultReport report;
-    const int size = klogctl(SYSLOG_ACTION_SIZE_BUFFER, nullptr, 0);
+    constexpr ssize_t maxKernelLogBytes = 256 * 1024;
+    ssize_t size = klogctl(SYSLOG_ACTION_SIZE_BUFFER, nullptr, 0);
     if (size <= 0)
     {
         report.openErrno = errno;
         return report;
     }
+    if (size > maxKernelLogBytes)
+    {
+        size = maxKernelLogBytes;
+    }
 
     std::vector<char> buf(static_cast<std::size_t>(size) + 1);
-    const int n = klogctl(SYSLOG_ACTION_READ_ALL, buf.data(), size);
+    const ssize_t n =
+        klogctl(SYSLOG_ACTION_READ_ALL, buf.data(), static_cast<int>(size));
     if (n < 0)
     {
         report.openErrno = errno;
         return report;
     }
     report.opened = true;
-
-    constexpr std::size_t maxLines = 8;
-    std::size_t begin = 0;
-    const std::string text(buf.data(), static_cast<std::size_t>(n));
-    while (begin < text.size())
-    {
-        std::size_t end = text.find('\n', begin);
-        if (end == std::string::npos)
-        {
-            end = text.size();
-        }
-        const std::string line = text.substr(begin, end - begin);
-        begin = end + 1;
-        if (!messageNamesNbdDevice(line, nbdName) ||
-            !isKernelNbdSocketFault(line))
-        {
-            continue;
-        }
-        std::string shown = line;
-        const auto stamp = line.find('[');
-        if (stamp != std::string::npos && stamp < 16)
-        {
-            shown = line.substr(stamp);
-        }
-        report.lines.push_back(std::move(shown));
-        if (report.lines.size() > maxLines)
-        {
-            report.lines.erase(report.lines.begin());
-        }
-    }
+    collectKernelNbdFaultLines(
+        report, std::string(buf.data(), static_cast<std::size_t>(n)), nbdName);
     return report;
-}
-
-inline bool isNbdLinkLossLine(const std::string& line)
-{
-    return line.find("Broken pipe") != std::string::npos ||
-           line.find("Connection reset by peer") != std::string::npos ||
-           line.find("Connection timed out") != std::string::npos ||
-           line.find("kernel returned") != std::string::npos ||
-           line.find("Kernel call returned") != std::string::npos ||
-           line.find("Dead connection") != std::string::npos;
 }
 
 class Process : public std::enable_shared_from_this<Process>
@@ -552,15 +481,8 @@ class Process : public std::enable_shared_from_this<Process>
                         {
                             self->certFailure = true;
                         }
-                        if (isNbdLinkLossLine(lineStr) &&
-                            self->nbdLinkLossLine.empty())
-                        {
-                            self->nbdLinkLossLine = lineStr;
-                        }
-                        if (lineStr.find("error:") != std::string::npos)
-                        {
-                            self->childErrorLine = lineStr;
-                        }
+                        noteChildOutputLine(self->nbdLinkLossLine,
+                                            self->childErrorLine, lineStr);
                         if (lineEnd == line.end())
                         {
                             break;
