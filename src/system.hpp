@@ -14,16 +14,6 @@
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <sys/klog.h>
-#include <sys/types.h>
-
-// glibc only exposes these when _DEFAULT_SOURCE is set. The unit-test
-// image compiles without it. The values are the syslog(2) command numbers.
-#ifndef SYSLOG_ACTION_READ_ALL
-#define SYSLOG_ACTION_READ_ALL 3
-#endif
-#ifndef SYSLOG_ACTION_SIZE_BUFFER
-#define SYSLOG_ACTION_SIZE_BUFFER 10
-#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -370,39 +360,15 @@ class DeviceMonitor
     boost::container::flat_map<NBDDevice, StateChange> devices;
 };
 
-// Copy the NBD driver's own fault lines out of the kernel ring. Those are
-// dev_err prints ("Connection timed out", "Dead connection", ...), so they
-// are already in the journal, but not in this process's log. Only the tail
-// is copied: klogctl(READ_ALL) returns the last `len` bytes, and a full
-// ring can be large. Callers run this off the io_context thread.
+// Copy the NBD driver's fault lines out of the kernel ring. The read runs
+// off the io_context thread. Only the last maxKernelLogBytes are requested.
 inline KernelNbdFaultReport
     readRecentKernelNbdFaults(const std::string& nbdName)
 {
-    KernelNbdFaultReport report;
-    constexpr ssize_t maxKernelLogBytes = 256 * 1024;
-    ssize_t size = klogctl(SYSLOG_ACTION_SIZE_BUFFER, nullptr, 0);
-    if (size <= 0)
-    {
-        report.openErrno = errno;
-        return report;
-    }
-    if (size > maxKernelLogBytes)
-    {
-        size = maxKernelLogBytes;
-    }
-
-    std::vector<char> buf(static_cast<std::size_t>(size) + 1);
-    const ssize_t n =
-        klogctl(SYSLOG_ACTION_READ_ALL, buf.data(), static_cast<int>(size));
-    if (n < 0)
-    {
-        report.openErrno = errno;
-        return report;
-    }
-    report.opened = true;
-    collectKernelNbdFaultLines(
-        report, std::string(buf.data(), static_cast<std::size_t>(n)), nbdName);
-    return report;
+    return readRecentKernelNbdFaults(
+        nbdName, [](int command, char* buffer, int length) {
+            return klogctl(command, buffer, length);
+        });
 }
 
 class Process : public std::enable_shared_from_this<Process>

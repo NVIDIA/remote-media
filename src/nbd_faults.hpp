@@ -1,9 +1,18 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <cctype>
+#include <cerrno>
 #include <cstddef>
 #include <string>
 #include <vector>
+
+// syslog(2) command numbers. glibc hides SYSLOG_ACTION_* unless
+// _DEFAULT_SOURCE is set, and the unit-test image does not set it.
+inline constexpr int kernelLogReadCommand = 3;
+inline constexpr int kernelLogSizeCommand = 10;
+inline constexpr ssize_t maxKernelLogBytes = 256 * 1024;
 
 // Parsing helpers for NBD socket failures. Kept free of klogctl and the
 // io_context so the filters can be tested without a kernel log.
@@ -110,4 +119,35 @@ inline void collectKernelNbdFaultLines(KernelNbdFaultReport& report,
             report.lines.erase(report.lines.begin());
         }
     }
+}
+
+// readLog matches klogctl(command, buffer, length). The production caller
+// passes klogctl; tests pass a stub so the size cap and error paths run
+// without a kernel ring.
+template <typename ReadLog>
+inline KernelNbdFaultReport
+    readRecentKernelNbdFaults(const std::string& nbdName, ReadLog&& readLog)
+{
+    KernelNbdFaultReport report;
+    const ssize_t size =
+        readLog(kernelLogSizeCommand, static_cast<char*>(nullptr), 0);
+    if (size <= 0)
+    {
+        report.openErrno = errno;
+        return report;
+    }
+    const ssize_t length = size > maxKernelLogBytes ? maxKernelLogBytes : size;
+    std::vector<char> buf(static_cast<std::size_t>(length) + 1);
+    const ssize_t byteCount =
+        readLog(kernelLogReadCommand, buf.data(), static_cast<int>(length));
+    if (byteCount < 0)
+    {
+        report.openErrno = errno;
+        return report;
+    }
+    report.opened = true;
+    collectKernelNbdFaultLines(
+        report, std::string(buf.data(), static_cast<std::size_t>(byteCount)),
+        nbdName);
+    return report;
 }

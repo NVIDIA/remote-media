@@ -1,5 +1,7 @@
 #include "nbd_faults.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -88,6 +90,71 @@ void testChildOutputClassification()
            "latest error: line is kept");
 }
 
+struct ScriptedKernelLog
+{
+    int sizeResult = 0;
+    int readResult = 0;
+    int readLength = -1;
+    std::string payload;
+    int operator()(int command, char* buffer, int length)
+    {
+        if (command == kernelLogSizeCommand)
+        {
+            return sizeResult;
+        }
+        readLength = length;
+        if (readResult < 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        const int count = readResult < static_cast<int>(payload.size())
+                              ? readResult
+                              : static_cast<int>(payload.size());
+        if (count > 0)
+        {
+            std::memcpy(buffer, payload.data(), static_cast<std::size_t>(count));
+        }
+        return count;
+    }
+};
+
+void testReadRecentKernelNbdFaults()
+{
+    errno = EACCES;
+    ScriptedKernelLog denied;
+    denied.sizeResult = -1;
+    const KernelNbdFaultReport closed =
+        readRecentKernelNbdFaults("nbd2", denied);
+    expect(!closed.opened, "size failure does not open the report");
+    expect(closed.openErrno == EACCES, "size failure keeps errno");
+
+    ScriptedKernelLog unread;
+    unread.sizeResult = 64;
+    unread.readResult = -1;
+    const KernelNbdFaultReport failedRead =
+        readRecentKernelNbdFaults("nbd2", unread);
+    expect(!failedRead.opened, "read failure does not open the report");
+    expect(failedRead.openErrno == EIO, "read failure records EIO");
+    expect(unread.readLength == 64, "small ring is read in full");
+
+    ScriptedKernelLog capped;
+    capped.sizeResult = static_cast<int>(maxKernelLogBytes) + 100;
+    capped.payload = "block nbd20: Connection timed out\n"
+                     "block nbd2: Connection timed out\n";
+    capped.readResult = static_cast<int>(capped.payload.size());
+    const KernelNbdFaultReport faults =
+        readRecentKernelNbdFaults("nbd2", capped);
+    expect(capped.readLength == static_cast<int>(maxKernelLogBytes),
+           "ring read is capped");
+    expect(faults.opened, "successful read opens the report");
+    expect(faults.lines.size() == 1, "stubbed ring keeps only nbd2");
+    expect(!faults.lines.empty() &&
+               faults.lines[0].find("nbd2: Connection timed out") !=
+                   std::string::npos,
+           "stubbed ring keeps the nbd2 fault");
+}
+
 } // namespace
 
 int main()
@@ -95,6 +162,7 @@ int main()
     testDeviceBoundary();
     testCollectFiltersAndKeepsTail();
     testChildOutputClassification();
+    testReadRecentKernelNbdFaults();
     if (failures != 0)
     {
         std::cerr << failures << " failure(s)\n";
