@@ -406,92 +406,93 @@ class Process : public std::enable_shared_from_this<Process>
         }
 
         boost::asio::spawn(
-            ioc, [this, self = shared_from_this(),
-                  onExit{std::move(onExit)}](boost::asio::yield_context yield) {
-                boost::system::error_code bec;
-                std::string line;
-                boost::asio::dynamic_string_buffer buffer{line};
-                LogMsg(Logger::Info,
-                       "[Process]: Start reading console from nbd-client");
-                while (1)
-                {
-                    auto x = boost::asio::async_read_until(
-                        self->pipe, std::move(buffer), '\n', yield[bec]);
-                    auto lineBegin = line.begin();
-                    while (lineBegin != line.end())
-                    {
-                        auto lineEnd = find(lineBegin, line.end(), '\n');
-                        std::string lineStr(lineBegin, lineEnd);
-                        LogMsg(Logger::Debug, "[Process]: (", self->name, ") ",
-                               lineStr);
-                        // Detect HTTP 401/403 from the nbdkit curl plugin
-                        // output ("returned error: NNN"). This is best-effort;
-                        // the substring is nbdkit-specific and may change.
-                        if (lineStr.find("returned error: 401") !=
-                                std::string::npos ||
-                            lineStr.find("returned error: 403") !=
-                                std::string::npos)
-                        {
-                            self->authFailure = true;
-                        }
-                        // Detect TLS certificate verification failure from the
-                        // nbdkit curl plugin. These errors occur before any HTTP
-                        // exchange when the server cert cannot be verified
-                        // (e.g. CA not installed in the BMC trust store).
-                        if (lineStr.find("SSL certificate problem") !=
-                                std::string::npos ||
-                            lineStr.find("SSL/TLS handshake failed") !=
-                                std::string::npos ||
-                            lineStr.find("certificate verify failed") !=
-                                std::string::npos)
-                        {
-                            self->certFailure = true;
-                        }
-                        noteChildOutputLine(self->nbdLinkLossLine,
-                                            self->childErrorLine, lineStr);
-                        if (lineEnd == line.end())
-                        {
-                            break;
-                        }
-                        lineBegin = lineEnd + 1;
-                    }
-
-                    buffer.consume(x);
-                    if (bec)
-                    {
-                        LogMsg(Logger::Debug, "[Process]: (", self->name,
-                               ") Loop Error: ", bec);
-                        break;
-                    }
-                }
-                LogMsg(Logger::Info, "[Process]: Exiting from COUT Loop");
-                // The process shall be dead, or almost here, give it a chance
-                LogMsg(Logger::Debug,
-                       "[Process]: Waiting process to finish normally");
-                boost::asio::steady_timer timer(self->ioc);
-                int32_t waitCnt = 20;
-                while (self->child.running() && waitCnt > 0)
-                {
-                    boost::system::error_code ignored_ec;
-                    timer.expires_after(std::chrono::milliseconds(100));
-                    timer.async_wait(yield[ignored_ec]);
-                    waitCnt--;
-                }
-                if (self->child.running())
-                {
-                    self->child.terminate();
-                }
-
-                self->child.wait();
-                LogMsg(Logger::Info, "[Process]: running: ", self->child.running(),
-                       " EC: ", self->child.exit_code(),
-                       " Native: ", self->child.native_exit_code());
-
-                onExit(self->child.exit_code(), self->dev.isReady(),
-                       self->authFailure, self->certFailure,
-                       self->nbdLinkLossLine, self->childErrorLine);
-            }, boost::asio::detached);
+            ioc,
+            [self = shared_from_this(), onExit = std::move(onExit)](
+                boost::asio::yield_context yield) mutable {
+                self->readChildOutput(std::move(onExit), yield);
+            },
+            boost::asio::detached);
         return true;
+    }
+
+    template <typename ExitCb>
+    void readChildOutput(ExitCb&& onExit, boost::asio::yield_context yield)
+    {
+        boost::system::error_code bec;
+        std::string line;
+        boost::asio::dynamic_string_buffer buffer{line};
+        LogMsg(Logger::Info, "[Process]: Start reading console from nbd-client");
+        while (1)
+        {
+            auto bytesRead = boost::asio::async_read_until(
+                pipe, std::move(buffer), '\n', yield[bec]);
+            auto lineBegin = line.begin();
+            while (lineBegin != line.end())
+            {
+                auto lineEnd = find(lineBegin, line.end(), '\n');
+                std::string lineStr(lineBegin, lineEnd);
+                LogMsg(Logger::Debug, "[Process]: (", name, ") ", lineStr);
+                // Detect HTTP 401/403 from the nbdkit curl plugin
+                // output ("returned error: NNN"). This is best-effort;
+                // the substring is nbdkit-specific and may change.
+                if (lineStr.find("returned error: 401") != std::string::npos ||
+                    lineStr.find("returned error: 403") != std::string::npos)
+                {
+                    authFailure = true;
+                }
+                // Detect TLS certificate verification failure from the
+                // nbdkit curl plugin. These errors occur before any HTTP
+                // exchange when the server cert cannot be verified
+                // (e.g. CA not installed in the BMC trust store).
+                if (lineStr.find("SSL certificate problem") !=
+                        std::string::npos ||
+                    lineStr.find("SSL/TLS handshake failed") !=
+                        std::string::npos ||
+                    lineStr.find("certificate verify failed") !=
+                        std::string::npos)
+                {
+                    certFailure = true;
+                }
+                noteChildOutputLine(nbdLinkLossLine, childErrorLine, lineStr);
+                if (lineEnd == line.end())
+                {
+                    break;
+                }
+                lineBegin = lineEnd + 1;
+            }
+
+            buffer.consume(bytesRead);
+            if (bec)
+            {
+                LogMsg(Logger::Debug, "[Process]: (", name, ") Loop Error: ",
+                       bec);
+                break;
+            }
+        }
+        LogMsg(Logger::Info, "[Process]: Exiting from COUT Loop");
+        // The process shall be dead, or almost here, give it a chance
+        LogMsg(Logger::Debug, "[Process]: Waiting process to finish normally");
+        boost::asio::steady_timer timer(ioc);
+        int32_t waitCnt = 20;
+        while (child.running() && waitCnt > 0)
+        {
+            boost::system::error_code ignored_ec;
+            timer.expires_after(std::chrono::milliseconds(100));
+            timer.async_wait(yield[ignored_ec]);
+            waitCnt--;
+        }
+        if (child.running())
+        {
+            child.terminate();
+        }
+
+        child.wait();
+        LogMsg(Logger::Info, "[Process]: running: ", child.running(),
+               " EC: ", child.exit_code(),
+               " Native: ", child.native_exit_code());
+
+        onExit(child.exit_code(), dev.isReady(), authFailure, certFailure,
+               nbdLinkLossLine, childErrorLine);
     }
 
     void stop()
