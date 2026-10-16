@@ -14,6 +14,15 @@
 
 #include <sys/klog.h>
 
+// glibc only exposes these when _DEFAULT_SOURCE is set. The unit-test
+// image compiles without it. The values are the syslog(2) command numbers.
+#ifndef SYSLOG_ACTION_READ_ALL
+#define SYSLOG_ACTION_READ_ALL 3
+#endif
+#ifndef SYSLOG_ACTION_SIZE_BUFFER
+#define SYSLOG_ACTION_SIZE_BUFFER 10
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
